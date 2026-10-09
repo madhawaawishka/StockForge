@@ -33,6 +33,7 @@
         <spotless.version>3.10.3</spotless.version>
         <palantir-java-format.version>2.102.0</palantir-java-format.version>
         <jacoco.version>0.8.15</jacoco.version>
+        <errorprone.version>2.50.0</errorprone.version>
     </properties>
 
     <dependencyManagement>
@@ -60,8 +61,20 @@
                         <!-- Treat compiler warnings as errors so they are fixed, not accumulated -->
                         <compilerArgs>
                             <arg>-Xlint:all,-processing,-serial</arg>
+                            <!-- Error Prone: static analysis for common Java bug patterns, run inside javac.
+                                 Its JDK-internal access flags live in .mvn/jvm.config. -->
+                            <arg>-XDcompilePolicy=simple</arg>
+                            <arg>--should-stop=ifError=FLOW</arg>
+                            <arg>-Xplugin:ErrorProne</arg>
                         </compilerArgs>
                         <failOnWarning>true</failOnWarning>
+                        <annotationProcessorPaths>
+                            <path>
+                                <groupId>com.google.errorprone</groupId>
+                                <artifactId>error_prone_core</artifactId>
+                                <version>${errorprone.version}</version>
+                            </path>
+                        </annotationProcessorPaths>
                     </configuration>
                 </plugin>
                 <plugin>
