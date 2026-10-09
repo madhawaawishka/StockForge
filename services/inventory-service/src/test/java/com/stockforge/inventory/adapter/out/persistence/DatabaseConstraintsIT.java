@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.stockforge.inventory.testsupport.InventoryIntegrationTest;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -96,7 +97,7 @@ class DatabaseConstraintsIT {
                 .param("id", id)
                 .param("sku", sku)
                 .param("status", status)
-                .param("now", OffsetDateTime.now())
+                .param("now", OffsetDateTime.now(ZoneOffset.UTC))
                 .update();
         return id;
     }
