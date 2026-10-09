@@ -26,18 +26,19 @@ This file is the single source of truth for **where the build is**. Every workin
 ## Current status
 | Item | Value |
 | :--- | :--- |
-| Phase | **Week 1 complete** — next: Week 2, concurrency core |
-| Active branch | `feat/week1-walking-skeleton` (owner to commit, push and merge to `main`) |
-| Build status | `./mvnw clean verify` green with Error Prone: 67 unit + 21 integration tests; coverage 98.7% lines / 89.6% branches |
-| CI on GitHub | Not run yet — confirm the first workflow run is green after pushing |
+| Phase | **Week 2 complete** — next: Week 3, Orders, gateway, gRPC, DB & cache performance |
+| Active branch | `feat/week2-concurrency-core` (owner to commit, push and merge to `main`) |
+| Build status | `./mvnw clean verify` green with Error Prone: 102 unit + 41 integration tests (143 total); Spotless clean; JaCoCo coverage generated |
+| CI on GitHub | Pending owner push & PR |
 | Last updated | 2026-10-09 |
 
 ## Next steps
-1. Owner: commit the session 2 changes, push, open a PR to `main`, confirm CI passes, merge.
-2. Create branch `feat/week2-concurrency-core` from the updated `main`.
-3. W2-01 `Reservation` aggregate + state machine with unit tests.
-4. W2-02 Flyway V2 (`reservations`, partial indexes, `idempotency_keys`).
-5. W2-03/W2-04 the four `StockReservationStrategy` implementations behind one interface, sharing one concurrency test suite — start with the naive strategy and a test that **proves it oversells**.
+1. Owner: commit the Week 2 changes, push `feat/week2-concurrency-core`, open a PR to `main`, confirm CI passes, merge.
+2. Create branch `feat/week3-orders-gateway` from the updated `main`.
+3. W3-01 `libs/proto` + buf lint/breaking; Spring gRPC server/client with deadlines (§12, §23).
+4. W3-02 API gateway (REST → gRPC), JWT auth (Spring Security resource server), object-level authorization (§28).
+5. W3-03 Order service: `orders`, `order_items`, `order_status_history`, state machine, idempotent create (§16, §19).
+6. W3-04 Large-dataset seed generator; EXPLAIN ANALYZE index report (§13).
 
 ---
 
@@ -58,14 +59,14 @@ Task IDs are stable — reference them in commits and session logs.
 - [x] W1-11 Docs: README v0, first ADRs, `docs/api/problems.md`
 
 ### Week 2 — Concurrency core (Tier 1)
-- [ ] W2-01 `Reservation` aggregate + state machine (PENDING → CONFIRMED / CANCELLED / EXPIRED) + tests (§16)
-- [ ] W2-02 Flyway V2: `reservations`, partial indexes, `idempotency_keys` (§13, §19)
-- [ ] W2-03 `StockReservationStrategy`: naive (oversell demo, test-only), pessimistic, optimistic, atomic conditional update (§14)
-- [ ] W2-04 Shared concurrency test suite for all strategies (latch start, repeated, invariant assertions) (§29)
-- [ ] W2-05 Reservation API: `POST /api/v1/reservations` (Idempotency-Key), `GET`, `POST …/cancel` (§12, §19)
-- [ ] W2-06 Purchase limit + write-skew reproduction test + fix (§15)
-- [ ] W2-07 Retryable SQLSTATE handling (`40001`, `40P01`), lock/statement timeouts verified (§14 F)
-- [ ] W2-08 ADR: concurrency strategy; benchmark-notes skeleton in `docs/benchmarks/`
+- [x] W2-01 `Reservation` aggregate + state machine (PENDING → CONFIRMED / CANCELLED / EXPIRED) + tests (§16)
+- [x] W2-02 Flyway V2: `reservations`, partial indexes, `idempotency_keys`, `user_product_limits` (§13, §19)
+- [x] W2-03 `StockReservationStrategy`: naive (oversell demo, test-only), pessimistic, optimistic, atomic conditional update (§14)
+- [x] W2-04 Shared concurrency test suite for all strategies (latch start, repeated, invariant assertions) (§29)
+- [x] W2-05 Reservation API: `POST /api/v1/reservations` (Idempotency-Key), `GET`, `POST …/cancel` (§12, §19)
+- [x] W2-06 Purchase limit + write-skew reproduction test + fix (§15)
+- [x] W2-07 Retryable SQLSTATE handling (`40001`, `40P01`), lock/statement timeouts verified (§14 F)
+- [x] W2-08 ADR: concurrency strategy; benchmark-notes skeleton in `docs/benchmarks/`
 
 ### Week 3 — Orders, gateway, gRPC, DB & cache performance (Tier 1/2)
 - [ ] W3-01 `libs/proto` + buf lint/breaking; Spring gRPC server/client with deadlines (§12, §23)
@@ -114,6 +115,7 @@ Short pointers; full reasoning lives in `docs/decisions/`.
 | 2026-10-08 | Spring `JdbcClient` with explicit SQL instead of JPA | [ADR-003](docs/decisions/ADR-003-jdbc-over-jpa.md) |
 | 2026-10-08 | Hexagonal architecture enforced by ArchUnit; use cases wired as `@Bean` | [ADR-004](docs/decisions/ADR-004-hexagonal-architecture.md) |
 | 2026-10-08 | Application-generated UUIDv7 identifiers | [ADR-005](docs/decisions/ADR-005-uuidv7-identifiers.md) |
+| 2026-10-09 | Inventory reservation concurrency strategy (Atomic conditional UPDATE baseline) | [ADR-006](docs/decisions/ADR-006-inventory-reservation-concurrency-strategy.md) |
 | 2026-10-09 | Error Prone runs inside `javac` on every build; its findings fail the build | `pom.xml`, `.mvn/jvm.config` |
 
 ## Deviations from the specification
@@ -139,6 +141,33 @@ Short pointers; full reasoning lives in `docs/decisions/`.
 
 ## Session log
 _Newest first._
+
+### Session 3 — 2026-10-09 — Week 2 completed
+**Done**
+- Created branch `feat/week2-concurrency-core` from updated `main`.
+- W2-01 Domain model & state machine: `Reservation` aggregate (`ReservationId`, `UserId`, `ReservationStatus`), strict transitions (`PENDING` → `CONFIRMED` / `CANCELLED` / `EXPIRED`), full unit test coverage. Updated `Inventory` aggregate with `reserve()`, `releaseReserved()`, `confirmReserved()`.
+- W2-02 Flyway V2 migration (`V2__create_reservations_and_idempotency.sql`): `reservations` table with status check, partial unique index `idx_reservations_active_unique` on `(user_id, product_id)` for pending reservations, `idempotency_keys` table for at-most-once execution, `user_product_limits` table with check constraint (`purchased_count <= 2`).
+- W2-03 Four `StockReservationStrategy` implementations:
+  - `AtomicConditionalUpdateReservationStrategy`: recommended baseline (`UPDATE … WHERE available_quantity >= :qty`). Marked `@Primary`.
+  - `PessimisticLockingReservationStrategy`: row lock (`SELECT … FOR UPDATE`) serialized inside transaction boundary.
+  - `OptimisticLockingReservationStrategy`: version-checked update with jittered backoff retries.
+  - `NaiveReservationStrategy`: test-only / benchmark-only lost-update demonstration.
+- W2-04 Shared concurrency test suite (`StockReservationConcurrencyIT`): 50 concurrent threads against 10 stock items. Verified atomic, pessimistic, and optimistic strategies strictly conserve stock (zero overselling) across repeated test runs. Verified naive strategy consistently oversells, capturing the lost-update anomaly.
+- W2-05 Reservation REST API: `POST /api/v1/reservations` with mandatory `Idempotency-Key` header, `GET /api/v1/reservations/{id}`, and `POST /api/v1/reservations/{id}/cancel`. Mapped all domain failures to RFC 9457 Problem Details (`insufficient-stock`, `purchase-limit-exceeded`, `missing-idempotency-key`, `idempotency-key-conflict`, `reservation-not-found`, `invalid-reservation-state`, `optimistic-lock-conflict`).
+- W2-06 Purchase limit enforcement (`PurchaseLimitWriteSkewIT`): atomic UPSERT on `user_product_limits` preventing write-skew under concurrent requests from the same user.
+- W2-07 Retryable SQLSTATE helper (`PostgresRetryTemplate`) with comprehensive unit tests for serialization failure (`40001`) and deadlock detected (`40P01`).
+- W2-08 Architecture Decision Record [ADR-006](docs/decisions/ADR-006-inventory-reservation-concurrency-strategy.md) documenting reservation concurrency strategy selection and trade-offs. Created benchmark skeleton at `docs/benchmarks/concurrency-strategies.md`. Updated `docs/api/problems.md`.
+
+**Problems found and fixed**
+- In `PessimisticLockingReservationStrategy`, `reserve()` initially lacked `@Transactional`, causing Spring JDBC auto-commit to release the `SELECT … FOR UPDATE` row lock before the subsequent update. Added `@Transactional` so the exclusive lock is held across the entire critical section.
+- Spring Boot 4 deprecations addressed: migrated `HttpStatus.UNPROCESSABLE_ENTITY` and `isUnprocessableEntity()` to `HttpStatus.UNPROCESSABLE_CONTENT` / HTTP 422.
+
+**Verification**
+- `./mvnw clean verify`: BUILD SUCCESS across parent and inventory-service.
+- 102 unit tests (domain models, state machine, use cases, controller WebMvc contracts, ArchUnit rules, retry template) pass cleanly.
+- 41 integration tests with Testcontainers PostgreSQL 18 pass cleanly (`StockReservationConcurrencyIT`, `ReservationApiIT`, `PurchaseLimitWriteSkewIT`, `CreateProductConcurrencyIT`, `ProductApiIT`, `DatabaseConstraintsIT`, `OperationalReadinessIT`).
+- Spotless formatting clean; JaCoCo reports generated.
+- All uncommitted changes left cleanly in working tree on `feat/week2-concurrency-core` for the user to commit.
 
 ### Session 2 — 2026-10-09 — Week 1 completed
 **Done**

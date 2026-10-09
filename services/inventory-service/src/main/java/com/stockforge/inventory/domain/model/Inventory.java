@@ -50,6 +50,63 @@ public record Inventory(
         return availableQuantity > 0;
     }
 
+    /** Atomically moves stock from available to reserved. */
+    public Inventory reserve(int quantity, Instant now) {
+        if (quantity <= 0) {
+            throw new DomainValidationException("Quantity to reserve must be positive");
+        }
+        if (availableQuantity < quantity) {
+            throw new DomainValidationException(
+                    "Insufficient stock: requested " + quantity + " but only " + availableQuantity + " available");
+        }
+        return new Inventory(
+                productId,
+                totalQuantity,
+                availableQuantity - quantity,
+                reservedQuantity + quantity,
+                soldQuantity,
+                version + 1,
+                now);
+    }
+
+    /** Releases reserved stock back to available (on cancellation or expiry). */
+    public Inventory releaseReserved(int quantity, Instant now) {
+        if (quantity <= 0) {
+            throw new DomainValidationException("Quantity to release must be positive");
+        }
+        if (reservedQuantity < quantity) {
+            throw new DomainValidationException(
+                    "Cannot release " + quantity + "; only " + reservedQuantity + " reserved");
+        }
+        return new Inventory(
+                productId,
+                totalQuantity,
+                availableQuantity + quantity,
+                reservedQuantity - quantity,
+                soldQuantity,
+                version + 1,
+                now);
+    }
+
+    /** Moves reserved stock to sold (on confirmation). */
+    public Inventory confirmReserved(int quantity, Instant now) {
+        if (quantity <= 0) {
+            throw new DomainValidationException("Quantity to confirm must be positive");
+        }
+        if (reservedQuantity < quantity) {
+            throw new DomainValidationException(
+                    "Cannot confirm " + quantity + "; only " + reservedQuantity + " reserved");
+        }
+        return new Inventory(
+                productId,
+                totalQuantity,
+                availableQuantity,
+                reservedQuantity - quantity,
+                soldQuantity + quantity,
+                version + 1,
+                now);
+    }
+
     private static void requireNonNegative(int quantity, String name) {
         if (quantity < 0) {
             throw new IllegalArgumentException(name + " must not be negative");

@@ -84,6 +84,82 @@ class DatabaseConstraintsIT {
                 .hasMessageContaining("products_status_valid");
     }
 
+    @Test
+    void reservationQuantityMustBePositive() {
+        UUID productId = insertProduct(uniqueSku());
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+
+        assertThatThrownBy(() -> jdbc.sql("""
+                                INSERT INTO reservations (id, user_id, product_id, quantity, status, expires_at, created_at, updated_at)
+                                VALUES (:id, :userId, :productId, 0, 'PENDING', :expiresAt, :now, :now)
+                                """)
+                        .param("id", UUID.randomUUID())
+                        .param("userId", UUID.randomUUID())
+                        .param("productId", productId)
+                        .param("expiresAt", now.plusMinutes(10))
+                        .param("now", now)
+                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("reservations_quantity_positive");
+    }
+
+    @Test
+    void reservationStatusMustBeValid() {
+        UUID productId = insertProduct(uniqueSku());
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+
+        assertThatThrownBy(() -> jdbc.sql("""
+                                INSERT INTO reservations (id, user_id, product_id, quantity, status, expires_at, created_at, updated_at)
+                                VALUES (:id, :userId, :productId, 1, 'INVALID_STATUS', :expiresAt, :now, :now)
+                                """)
+                        .param("id", UUID.randomUUID())
+                        .param("userId", UUID.randomUUID())
+                        .param("productId", productId)
+                        .param("expiresAt", now.plusMinutes(10))
+                        .param("now", now)
+                        .update())
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("reservations_status_valid");
+    }
+
+    @Test
+    void idempotencyKeyPrimaryKeysEnforceUserScoping() {
+        UUID userId = UUID.randomUUID();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+
+        jdbc.sql("""
+                        INSERT INTO idempotency_keys (key, user_id, request_hash, status, created_at, expires_at)
+                        VALUES ('key-1', :userId, 'hash1', 'COMPLETED', :now, :expiresAt)
+                        """)
+                .param("userId", userId)
+                .param("now", now)
+                .param("expiresAt", now.plusHours(24))
+                .update();
+
+        // Duplicate (key, userId) must fail
+        assertThatThrownBy(() -> jdbc.sql("""
+                                INSERT INTO idempotency_keys (key, user_id, request_hash, status, created_at, expires_at)
+                                VALUES ('key-1', :userId, 'hash2', 'IN_PROGRESS', :now, :expiresAt)
+                                """)
+                        .param("userId", userId)
+                        .param("now", now)
+                        .param("expiresAt", now.plusHours(24))
+                        .update())
+                .isInstanceOf(DuplicateKeyException.class)
+                .hasMessageContaining("idempotency_keys_pk");
+
+        // Same key with different user succeeds (scoped by user)
+        int otherUser = jdbc.sql("""
+                        INSERT INTO idempotency_keys (key, user_id, request_hash, status, created_at, expires_at)
+                        VALUES ('key-1', :otherUser, 'hash1', 'COMPLETED', :now, :expiresAt)
+                        """)
+                .param("otherUser", UUID.randomUUID())
+                .param("now", now)
+                .param("expiresAt", now.plusHours(24))
+                .update();
+        org.assertj.core.api.Assertions.assertThat(otherUser).isOne();
+    }
+
     private UUID insertProduct(String sku) {
         return insertProduct(sku, "ACTIVE");
     }

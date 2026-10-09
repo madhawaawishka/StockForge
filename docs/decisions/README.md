@@ -10,6 +10,7 @@ ADRs are immutable once accepted — a changed decision gets a new ADR that supe
 | [ADR-003](ADR-003-jdbc-over-jpa.md) | Spring JDBC with explicit SQL instead of JPA | Accepted |
 | [ADR-004](ADR-004-hexagonal-architecture.md) | Hexagonal architecture enforced by ArchUnit | Accepted |
 | [ADR-005](ADR-005-uuidv7-identifiers.md) | Application-generated UUIDv7 identifiers | Accepted |
+| [ADR-006](ADR-006-inventory-reservation-concurrency-strategy.md) | Inventory reservation concurrency control strategy | Accepted |
 
 ## Template
 ```markdown
