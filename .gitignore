@@ -1,0 +1,31 @@
+# Build output
+target/
+*.class
+*.log
+
+# Maven Wrapper downloads its own distribution; keep only the wrapper scripts and properties
+.mvn/wrapper/maven-wrapper.jar
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+!.vscode/extensions.json
+.settings/
+.project
+.classpath
+.factorypath
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local environment and secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Load-test and benchmark scratch output (curated reports live in docs/benchmarks)
+load-tests/results/
