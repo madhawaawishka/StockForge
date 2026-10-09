@@ -5,3 +5,10 @@ logging:
     format:
       # Plain-text logs are easier to read in test failure output.
       console: ""
+
+# API docs are opt-in in production; tests verify the generated OpenAPI document.
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true

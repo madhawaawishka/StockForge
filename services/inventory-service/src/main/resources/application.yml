@@ -48,9 +48,13 @@ management:
       enabled: true
 
 springdoc:
+  # Opt-in: a deployed service does not publish its API surface unless asked to (spec §28).
+  # The local profile and the tests enable it.
   api-docs:
+    enabled: ${INVENTORY_API_DOCS_ENABLED:false}
     path: /v3/api-docs
   swagger-ui:
+    enabled: ${INVENTORY_API_DOCS_ENABLED:false}
     path: /swagger-ui.html
 
 logging:

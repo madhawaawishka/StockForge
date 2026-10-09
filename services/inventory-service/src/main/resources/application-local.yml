@@ -6,6 +6,12 @@ spring:
     username: inventory_svc
     password: inventory_local_only
 
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+
 logging:
   structured:
     format:
