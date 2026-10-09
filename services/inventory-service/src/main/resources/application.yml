@@ -1,0 +1,60 @@
+# Production-style defaults. Every environment-specific value comes from environment variables (12-factor);
+# missing required variables fail startup instead of falling back to unsafe defaults.
+spring:
+  application:
+    name: inventory-service
+  datasource:
+    url: ${INVENTORY_DB_URL}
+    username: ${INVENTORY_DB_USERNAME}
+    password: ${INVENTORY_DB_PASSWORD}
+    hikari:
+      pool-name: inventory-db
+      # Small and fixed on purpose: more connections is not more throughput (spec §24).
+      maximum-pool-size: ${INVENTORY_DB_POOL_SIZE:10}
+      minimum-idle: ${INVENTORY_DB_POOL_SIZE:10}
+      connection-timeout: 3000
+      # Every connection works in this service's own schema (ADR-002).
+      schema: inventory
+      data-source-properties:
+        # Server-side timeouts so a stuck query or forgotten transaction cannot hold a pooled connection (spec §23 A).
+        options: "-c statement_timeout=5000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=10000"
+  flyway:
+    schemas: inventory
+    default-schema: inventory
+  jackson:
+    deserialization:
+      # Reject unexpected fields instead of silently ignoring them (spec §28).
+      fail-on-unknown-properties: true
+
+server:
+  port: ${INVENTORY_HTTP_PORT:8081}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        # Readiness includes the database; liveness deliberately does not, so a database blip
+        # does not make the orchestrator restart every instance (spec §33).
+        readiness:
+          include: readinessState,db
+  info:
+    build:
+      enabled: true
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  structured:
+    format:
+      # Machine-readable JSON logs (Elastic Common Schema) by default; the local profile switches to plain text.
+      console: ecs
