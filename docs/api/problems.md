@@ -45,6 +45,34 @@ Some domain rules cannot be expressed as field constraints (for example, more de
 **Status 409.** Another product already uses this SKU. SKUs are unique; concurrent attempts to create the same SKU result in exactly one product.
 **Fix:** use a different SKU, or fetch the existing product.
 
+## missing-idempotency-key
+**Status 400.** The `Idempotency-Key` HTTP header is missing from a state-mutating POST request.
+**Fix:** include a unique `Idempotency-Key` header with each mutating request.
+
+## insufficient-stock
+**Status 409.** The requested quantity of the product is no longer available in inventory.
+**Fix:** check availability with `GET /api/v1/products/{id}/availability` and request a smaller quantity if stock permits.
+
+## purchase-limit-exceeded
+**Status 422.** The user has reached or exceeded the allowed active units for this product.
+**Fix:** wait until existing pending reservations expire or are cancelled, or reduce the requested quantity.
+
+## idempotency-key-conflict
+**Status 409.** The supplied `Idempotency-Key` has already been used with a different request payload or is currently being processed by another concurrent request.
+**Fix:** generate a fresh unique key for new operations, or wait for in-progress operations to complete.
+
+## reservation-not-found
+**Status 404.** No reservation exists with the given ID.
+**Fix:** check the reservation ID.
+
+## invalid-reservation-state
+**Status 409.** The operation cannot be performed on the reservation in its current status (e.g. attempting to cancel an already cancelled, confirmed, or expired reservation).
+**Fix:** check current reservation status with `GET /api/v1/reservations/{id}`.
+
+## optimistic-lock-conflict
+**Status 409.** Concurrent update conflicts on the inventory row exhausted all application retry attempts.
+**Fix:** retry the request with backoff.
+
 ## internal-error
 **Status 500.** An unexpected server error. Details are logged server-side and deliberately not returned.
 **Fix:** retry later; if it persists, report the time of the request and the `instance` value.
