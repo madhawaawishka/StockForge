@@ -1,0 +1,14 @@
+# Test-only overrides, layered on top of src/main/resources/application.yml
+# (classpath:/config/ has higher precedence than classpath:/, so the main file is not shadowed).
+logging:
+  structured:
+    format:
+      # Plain-text logs are easier to read in test failure output.
+      console: ""
+
+# API docs are opt-in in production; tests verify the generated OpenAPI document.
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true

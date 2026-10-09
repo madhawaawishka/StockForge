@@ -1,0 +1,18 @@
+# Local development against `docker compose up`. These credentials only exist in the local
+# Docker Compose database and are not secrets; real environments supply INVENTORY_DB_* variables.
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/stockforge
+    username: inventory_svc
+    password: inventory_local_only
+
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+
+logging:
+  structured:
+    format:
+      console: ""
