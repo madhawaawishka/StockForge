@@ -55,4 +55,59 @@ class InventoryTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Stock conservation violated");
     }
+
+    @Test
+    void reserveTransitionsStockAndIncrementsVersion() {
+        Inventory initial = Inventory.initial(PRODUCT, 10, NOW);
+        Instant later = NOW.plusSeconds(5);
+
+        Inventory reserved = initial.reserve(3, later);
+
+        assertThat(reserved.totalQuantity()).isEqualTo(10);
+        assertThat(reserved.availableQuantity()).isEqualTo(7);
+        assertThat(reserved.reservedQuantity()).isEqualTo(3);
+        assertThat(reserved.soldQuantity()).isZero();
+        assertThat(reserved.version()).isEqualTo(1);
+        assertThat(reserved.updatedAt()).isEqualTo(later);
+    }
+
+    @Test
+    void reserveRejectsInsufficientOrNonPositiveQuantity() {
+        Inventory initial = Inventory.initial(PRODUCT, 5, NOW);
+
+        assertThatThrownBy(() -> initial.reserve(6, NOW))
+                .isInstanceOf(DomainValidationException.class)
+                .hasMessageContaining("Insufficient stock");
+        assertThatThrownBy(() -> initial.reserve(0, NOW))
+                .isInstanceOf(DomainValidationException.class)
+                .hasMessageContaining("must be positive");
+    }
+
+    @Test
+    void releaseReservedTransitionsStockBackToAvailable() {
+        Inventory reserved = Inventory.initial(PRODUCT, 10, NOW).reserve(4, NOW);
+        Instant later = NOW.plusSeconds(10);
+
+        Inventory released = reserved.releaseReserved(4, later);
+
+        assertThat(released.availableQuantity()).isEqualTo(10);
+        assertThat(released.reservedQuantity()).isZero();
+        assertThat(released.soldQuantity()).isZero();
+        assertThat(released.version()).isEqualTo(2);
+        assertThat(released.updatedAt()).isEqualTo(later);
+    }
+
+    @Test
+    void confirmReservedTransitionsStockToSold() {
+        Inventory reserved = Inventory.initial(PRODUCT, 10, NOW).reserve(4, NOW);
+        Instant later = NOW.plusSeconds(10);
+
+        Inventory confirmed = reserved.confirmReserved(4, later);
+
+        assertThat(confirmed.availableQuantity()).isEqualTo(6);
+        assertThat(confirmed.reservedQuantity()).isZero();
+        assertThat(confirmed.soldQuantity()).isEqualTo(4);
+        assertThat(confirmed.version()).isEqualTo(2);
+        assertThat(confirmed.updatedAt()).isEqualTo(later);
+    }
 }
