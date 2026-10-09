@@ -31,7 +31,7 @@ services:
       retries: 20
 
   redis:
-    image: redis:8.8.3
+    image: redis:8.10.1
     # Cache and rate-limit counters only: nothing here must survive a restart, so persistence is off.
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     ports:
