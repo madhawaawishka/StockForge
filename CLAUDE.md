@@ -5,7 +5,8 @@ The full specification is [high_concurrency_inventory_reservation_project_specif
 
 ## Session protocol (mandatory)
 - **Start:** read [PROGRESS.md](PROGRESS.md) first. It records the active branch, build status and the next task. Continue from there.
-- **End:** update PROGRESS.md (checklist, session log, current status, next steps) and commit. Report test results honestly — never mark a task done unless it is verified.
+- **End:** run `./mvnw verify`, then update PROGRESS.md (checklist, session log, current status, next steps). Report test results honestly — never mark a task done unless it is verified.
+- **Commits:** the project owner commits and pushes. Leave changes uncommitted and hand over suggested Conventional Commit messages, unless the owner explicitly asks you to commit.
 
 ## Commands
 | Purpose | Command |
@@ -17,6 +18,10 @@ The full specification is [high_concurrency_inventory_reservation_project_specif
 | Run the inventory service locally | `./mvnw -pl services/inventory-service spring-boot:run -Dspring-boot.run.profiles=local` |
 
 Integration tests (`*IT.java`) use Testcontainers and need Docker Desktop running. On Windows use Git Bash for `./mvnw` (or `mvnw.cmd` in PowerShell).
+
+Windows notes:
+- In Git Bash, prefix `docker … /absolute/container/path` commands with `MSYS_NO_PATHCONV=1`, or the path is rewritten to a Windows path.
+- `spring-boot:run` forks the application JVM; stopping Maven does not stop it. Free port 8081 by stopping the process that listens on it.
 
 ## Architecture rules (enforced by ArchUnit — do not break them)
 Each service uses hexagonal architecture under `com.stockforge.<service>`:
@@ -47,4 +52,4 @@ Each service uses hexagonal architecture under `com.stockforge.<service>`:
 ## Git workflow
 - One branch per milestone or feature (`feat/…`, `fix/…`, `docs/…`); never commit directly to `main`.
 - Conventional Commits (`feat:`, `fix:`, `test:`, `docs:`, `build:`, `ci:`, `refactor:`, `perf:`), referencing task IDs from PROGRESS.md (e.g., `feat(inventory): add product catalog (W1-07)`).
-- Do not push or open PRs unless the project owner asks.
+- Do not commit, push or open PRs unless the project owner asks.
