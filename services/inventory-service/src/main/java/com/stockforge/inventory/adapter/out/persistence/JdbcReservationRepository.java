@@ -103,6 +103,22 @@ class JdbcReservationRepository implements ReservationRepository {
                 .list();
     }
 
+    @Override
+    public List<Reservation> claimExpiredPendingBatch(Instant now, int limit) {
+        return jdbc.sql("""
+                        SELECT id, user_id, product_id, quantity, status, expires_at, created_at, updated_at
+                        FROM reservations
+                        WHERE status = 'PENDING' AND expires_at < :now
+                        ORDER BY expires_at
+                        LIMIT :limit
+                        FOR UPDATE SKIP LOCKED
+                        """)
+                .param("now", toTimestamp(now))
+                .param("limit", limit)
+                .query(JdbcReservationRepository::mapRow)
+                .list();
+    }
+
     private static Reservation mapRow(ResultSet rs, int rowNum) throws SQLException {
         return new Reservation(
                 ReservationId.of(rs.getObject("id", UUID.class)),

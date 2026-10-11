@@ -17,14 +17,30 @@ public class ProductCatalogQueries {
 
     private final ProductRepository products;
     private final InventoryRepository inventories;
+    private final com.stockforge.inventory.domain.port.ProductCache productCache;
 
     public ProductCatalogQueries(ProductRepository products, InventoryRepository inventories) {
+        this(products, inventories, com.stockforge.inventory.domain.port.ProductCache.NO_OP);
+    }
+
+    public ProductCatalogQueries(
+            ProductRepository products,
+            InventoryRepository inventories,
+            com.stockforge.inventory.domain.port.ProductCache productCache) {
         this.products = products;
         this.inventories = inventories;
+        this.productCache =
+                productCache != null ? productCache : com.stockforge.inventory.domain.port.ProductCache.NO_OP;
     }
 
     public Optional<Product> findProduct(ProductId id) {
-        return products.findById(id);
+        Optional<Product> cached = productCache.getProduct(id);
+        if (cached.isPresent()) {
+            return cached;
+        }
+        Optional<Product> found = products.findById(id);
+        found.ifPresent(productCache::putProduct);
+        return found;
     }
 
     public ProductPage firstPage(int limit) {
@@ -43,7 +59,13 @@ public class ProductCatalogQueries {
      * §17); the reservation path never does.
      */
     public Optional<Inventory> findInventory(ProductId id) {
-        return inventories.findByProductId(id);
+        Optional<Inventory> cached = productCache.getInventory(id);
+        if (cached.isPresent()) {
+            return cached;
+        }
+        Optional<Inventory> found = inventories.findByProductId(id);
+        found.ifPresent(productCache::putInventory);
+        return found;
     }
 
     private static ProductPage toPage(List<Product> rows, int limit) {

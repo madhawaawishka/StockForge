@@ -28,4 +28,7 @@ public interface ReservationRepository {
 
     /** Finds PENDING reservations that have passed their expires_at timestamp. */
     List<Reservation> findExpiredPending(Instant now, int limit);
+
+    /** Atomically claims expired PENDING reservations using FOR UPDATE SKIP LOCKED (spec §21). */
+    List<Reservation> claimExpiredPendingBatch(Instant now, int limit);
 }

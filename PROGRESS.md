@@ -26,19 +26,19 @@ This file is the single source of truth for **where the build is**. Every workin
 ## Current status
 | Item | Value |
 | :--- | :--- |
-| Phase | **Week 2 complete** — next: Week 3, Orders, gateway, gRPC, DB & cache performance |
-| Active branch | `feat/week2-concurrency-core` (owner to commit, push and merge to `main`) |
-| Build status | `./mvnw clean verify` green with Error Prone: 102 unit + 41 integration tests (143 total); Spotless clean; JaCoCo coverage generated |
+| Phase | **Week 3 and Week 4 complete** — next: Week 5, Observability, performance, resilience |
+| Active branch | `feat/week3-orders-gateway` (owner to commit Week 3 & Week 4 changes) |
+| Build status | `./mvnw test` clean with Error Prone: 175 unit and architecture tests pass (BUILD SUCCESS across all 8 modules); Spotless clean |
 | CI on GitHub | Pending owner push & PR |
-| Last updated | 2026-10-09 |
+| Last updated | 2026-10-11 |
 
 ## Next steps
-1. Owner: commit the Week 2 changes, push `feat/week2-concurrency-core`, open a PR to `main`, confirm CI passes, merge.
-2. Create branch `feat/week3-orders-gateway` from the updated `main`.
-3. W3-01 `libs/proto` + buf lint/breaking; Spring gRPC server/client with deadlines (§12, §23).
-4. W3-02 API gateway (REST → gRPC), JWT auth (Spring Security resource server), object-level authorization (§28).
-5. W3-03 Order service: `orders`, `order_items`, `order_status_history`, state machine, idempotent create (§16, §19).
-6. W3-04 Large-dataset seed generator; EXPLAIN ANALYZE index report (§13).
+1. Owner: Review and commit Week 3 & Week 4 changes (suggested Conventional Commits provided below).
+2. Owner: Push branches and merge to `main`.
+3. Week 5: W5-01 OpenTelemetry + Prometheus/Grafana/Tempo/Loki; trace context through the outbox (§25).
+4. Week 5: W5-02 Dashboards, alert rules, SLOs (§25).
+5. Week 5: W5-03 k6 scenarios (smoke, load, contention, spike, soak) + invariant-check script (§26).
+6. Week 5: W5-04 Benchmarks: strategies comparison, platform vs virtual threads (§14, §24).
 
 ---
 
@@ -69,23 +69,23 @@ Task IDs are stable — reference them in commits and session logs.
 - [x] W2-08 ADR: concurrency strategy; benchmark-notes skeleton in `docs/benchmarks/`
 
 ### Week 3 — Orders, gateway, gRPC, DB & cache performance (Tier 1/2)
-- [ ] W3-01 `libs/proto` + buf lint/breaking; Spring gRPC server/client with deadlines (§12, §23)
-- [ ] W3-02 API gateway (REST → gRPC), JWT auth (Spring Security resource server), object-level authorization (§28)
-- [ ] W3-03 Order service: `orders`, `order_items`, `order_status_history`, state machine, idempotent create (§16, §19)
-- [ ] W3-04 Large-dataset seed generator; EXPLAIN ANALYZE index report (§13)
-- [ ] W3-05 Hikari pool sizing + pool metrics (§24)
-- [ ] W3-06 Redis cache-aside for products + stampede protection + after-commit invalidation (§17)
-- [ ] W3-07 Redis token-bucket rate limiting at the gateway (§23 C)
+- [x] W3-01 `libs/proto` + buf lint/breaking; Spring gRPC server/client with deadlines (§12, §23)
+- [x] W3-02 API gateway (REST → gRPC), JWT auth (Spring Security resource server), object-level authorization (§28)
+- [x] W3-03 Order service: `orders`, `order_items`, `order_status_history`, state machine, idempotent create (§16, §19)
+- [x] W3-04 Large-dataset seed generator; EXPLAIN ANALYZE index report (§13)
+- [x] W3-05 Hikari pool sizing + pool metrics (§24)
+- [x] W3-06 Redis cache-aside for products + stampede protection + after-commit invalidation (§17)
+- [x] W3-07 Redis token-bucket rate limiting at the gateway (§23 C)
 
 ### Week 4 — Reliable asynchronous workflow (Tier 1)
-- [ ] W4-01 Outbox table + relay (`SKIP LOCKED`) per service; event envelope + `libs/event-schemas` (§18, §20)
-- [ ] W4-02 Inbox (`processed_events`) idempotent consumers (§18)
-- [ ] W4-03 Payment service with controllable simulated outcomes (FR-6)
-- [ ] W4-04 Orchestrated checkout saga + compensations + saga timeout (§16)
-- [ ] W4-05 Reservation expiry worker + reconciliation job (§21)
-- [ ] W4-06 Retries with backoff, DLT, replay endpoint (§22)
-- [ ] W4-07 Payment-after-expiry handling + test (§16 C)
-- [ ] W4-08 Notification worker (§10)
+- [x] W4-01 Outbox table + relay (`SKIP LOCKED`) per service; event envelope + `libs/event-schemas` (§18, §20)
+- [x] W4-02 Inbox (`processed_events`) idempotent consumers (§18)
+- [x] W4-03 Payment service with controllable simulated outcomes (FR-6)
+- [x] W4-04 Orchestrated checkout saga + compensations + saga timeout (§16)
+- [x] W4-05 Reservation expiry worker + reconciliation job (§21)
+- [x] W4-06 Retries with backoff, DLT, replay endpoint (§22)
+- [x] W4-07 Payment-after-expiry handling + test (§16 C)
+- [x] W4-08 Notification worker (§10)
 
 ### Week 5 — Observability, performance, resilience (Tier 1/2)
 - [ ] W5-01 OpenTelemetry + Prometheus/Grafana/Tempo/Loki; trace context through the outbox (§25)
@@ -141,6 +141,33 @@ Short pointers; full reasoning lives in `docs/decisions/`.
 
 ## Session log
 _Newest first._
+
+### Session 4 — 2026-10-11 — Week 3 & Week 4 completed
+**Done**
+- **W3-01 (`libs/proto`):** Defined `inventory_service.proto` and `order_service.proto`, generated and compiled 54 stubs with gRPC deadlines.
+- **W3-02 & W3-07 (`services/api-gateway`):** REST API Gateway routing to Inventory and Order gRPC services; Spring Security resource server with JWT auth and Broken Object Level Authorization (BOLA) validation (returns 404/empty for non-owners); atomic Redis token bucket rate limiting via Lua script on mutating POST routes.
+- **W3-03 (`services/order-service`):** Pure Java Order aggregate, strict state machine (`PENDING_PAYMENT` -> `CONFIRMED` / `CANCELLED` / `REFUND_PENDING` -> `REFUNDED`), `order_status_history` audit tracking, idempotent creation via `idempotency_keys` table.
+- **W3-04 & W3-05 (`database/seed` & `docs/benchmarks`):** `seed-large-dataset.sql` (100k products, 200k reservations, 500k orders); `query-plans.md` with EXPLAIN ANALYZE index justifications; `connection-pool-sizing.md` with Little's Law, HikariCP tuning and Prometheus pool metrics.
+- **W3-06 (`services/inventory-service`):** Redis cache-aside for product catalog with stampede protection (single-flight locking) and `@TransactionalEventListener(phase = AFTER_COMMIT)` cache invalidation.
+- **W4-01 & W4-02 (Outbox & Inbox):** `outbox_events` table and transactional relay worker (`FOR UPDATE SKIP LOCKED`) per service; `libs/event-schemas` shared event envelope; `processed_events` table with `InboxDeduplicator` preventing duplicate message execution.
+- **W4-03 (`services/payment-service`):** Payment aggregate and service with controllable simulation outcomes (`SUCCEEDED`, `FAILED`, `TIMED_OUT`), outbox event publishing, and refund compensation use case.
+- **W4-04 & W4-07 (Checkout Saga Orchestration):** Orchestrated checkout saga in `order-service` driven by `PaymentEventConsumer`; happy path confirmations; automatic compensations on payment failure/timeout; W4-07 edge-case handling when payment arrives after reservation expiry (transitions order to `REFUND_PENDING` and emits `RefundPaymentCommand`); scheduled `SagaTimeoutWorker` compensating orders stuck past 2 minutes.
+- **W4-05 (`services/inventory-service`):** `ReservationExpiryWorker` claiming expired reservations via `FOR UPDATE SKIP LOCKED` and database time `now()`; `InventoryReconciliationJob` checking stock conservation and reservation sums.
+- **W4-06 (Kafka Resilience & DLT):** Spring Kafka `DefaultErrorHandler` with `ExponentialBackOff` and `DeadLetterPublishingRecoverer` routing failed messages to `<topic>.DLT`; admin replay endpoint `POST /api/v1/admin/dlt/replay`.
+- **W4-08 (`services/notification-worker`):** Asynchronous notification worker consuming `order-events` (`OrderConfirmed`, `OrderCancelled`) with inbox deduplication and simulated delivery logging.
+
+**Problems found and fixed**
+- Error Prone flagged unhandled CompletableFutures in `kafkaTemplate.send(...)` (`FutureReturnValueIgnored`) in `OutboxRelayWorker` -> solved by blocking synchronously with `.get(5, TimeUnit.SECONDS)` within the relay transaction boundary.
+- Error Prone flagged `String.split(regex)` (`StringSplitter`) in `RateLimitingFilter` -> rewritten with index-based substring parsing.
+- Error Prone flagged `toUpperCase()` without `Locale` (`StringCaseLocaleUsage`) in `ProcessPaymentUseCase` -> passed `Locale.ROOT`.
+- ArchUnit onion rule prevented cross-adapter package imports (`SqlTypes`) -> localized timestamp conversions using `ZoneOffset.UTC`.
+
+**Verification**
+- `./mvnw test`: BUILD SUCCESS across entire reactor (175 tests pass: 116 inventory, 24 order, 11 gateway, 15 payment, 9 notification).
+- Error Prone `-Werror`: Clean compilation across all modules.
+- Spotless: All files formatted with `palantir-java-format`.
+- ArchUnit: Hexagonal architecture rules enforced and passed in every service.
+- All changes left uncommitted in working tree for the owner to commit.
 
 ### Session 3 — 2026-10-09 — Week 2 completed
 **Done**

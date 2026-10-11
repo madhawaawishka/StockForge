@@ -20,7 +20,13 @@
     <url>https://github.com/madhawaawishka/StockForge</url>
 
     <modules>
+        <module>libs/proto</module>
+        <module>libs/event-schemas</module>
         <module>services/inventory-service</module>
+        <module>services/order-service</module>
+        <module>services/api-gateway</module>
+        <module>services/payment-service</module>
+        <module>services/notification-worker</module>
     </modules>
 
     <properties>
@@ -34,6 +40,10 @@
         <palantir-java-format.version>2.102.0</palantir-java-format.version>
         <jacoco.version>0.8.15</jacoco.version>
         <errorprone.version>2.50.0</errorprone.version>
+        <grpc.version>1.69.0</grpc.version>
+        <protobuf.version>3.25.5</protobuf.version>
+        <os-maven-plugin.version>1.7.1</os-maven-plugin.version>
+        <protobuf-maven-plugin.version>0.6.1</protobuf-maven-plugin.version>
     </properties>
 
     <dependencyManagement>

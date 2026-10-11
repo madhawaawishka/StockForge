@@ -68,6 +68,11 @@ public class InMemoryReservationRepository implements ReservationRepository {
                 .toList();
     }
 
+    @Override
+    public synchronized List<Reservation> claimExpiredPendingBatch(Instant now, int limit) {
+        return findExpiredPending(now, limit);
+    }
+
     public synchronized int count() {
         return reservations.size();
     }
