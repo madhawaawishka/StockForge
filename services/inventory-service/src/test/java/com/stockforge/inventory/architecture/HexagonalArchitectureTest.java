@@ -24,7 +24,11 @@ class HexagonalArchitectureTest {
             .domainServices("..domain.port..")
             .applicationServices("..application..")
             .adapter("web", "..adapter.in.web..")
+            .adapter("grpc", "..adapter.in.grpc..")
+            .adapter("scheduler", "..adapter.in.scheduler..")
             .adapter("persistence", "..adapter.out.persistence..")
+            .adapter("cache", "..adapter.out.cache..")
+            .adapter("messaging", "..adapter.out.messaging..")
             .adapter("id", "..adapter.out.id..")
             // The config package is the composition root: wiring every layer together is its only job.
             .ignoreDependency(resideInAPackage("..config.."), alwaysTrue());
@@ -45,7 +49,11 @@ class HexagonalArchitectureTest {
             .should()
             .onlyDependOnClassesThat()
             .resideInAnyPackage(
-                    "java..", "..domain..", "..application..", "org.springframework.transaction.annotation..")
+                    "java..",
+                    "..domain..",
+                    "..application..",
+                    "com.stockforge.events..",
+                    "org.springframework.transaction.annotation..")
             .because("use cases own transaction boundaries but must not depend on web, persistence or messaging");
 
     @ArchTest
@@ -61,8 +69,9 @@ class HexagonalArchitectureTest {
     @ArchTest
     static final ArchRule adaptersAreNotPublicApi = classes()
             .that()
-            .resideInAnyPackage("..adapter.in.web..", "..adapter.out.persistence..")
+            .resideInAnyPackage(
+                    "..adapter.in.web..", "..adapter.in.grpc..", "..adapter.out.persistence..", "..adapter.out.cache..")
             .should()
             .notBePublic()
-            .because("adapters are implementation details reached only through ports or HTTP");
+            .because("adapters are implementation details reached only through ports, HTTP, or gRPC");
 }

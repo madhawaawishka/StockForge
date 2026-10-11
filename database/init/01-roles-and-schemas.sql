@@ -20,4 +20,7 @@ CREATE SCHEMA ordering AUTHORIZATION order_svc;
 CREATE ROLE payment_svc LOGIN PASSWORD 'payment_local_only';
 CREATE SCHEMA payment AUTHORIZATION payment_svc;
 
-GRANT CONNECT ON DATABASE stockforge TO inventory_svc, order_svc, payment_svc;
+CREATE ROLE notification_svc LOGIN PASSWORD 'notification_local_only';
+CREATE SCHEMA notification AUTHORIZATION notification_svc;
+
+GRANT CONNECT ON DATABASE stockforge TO inventory_svc, order_svc, payment_svc, notification_svc;

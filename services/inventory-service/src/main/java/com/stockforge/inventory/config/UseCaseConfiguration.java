@@ -2,6 +2,7 @@ package com.stockforge.inventory.config;
 
 import com.stockforge.inventory.adapter.out.id.UuidV7Generator;
 import com.stockforge.inventory.application.CancelReservationUseCase;
+import com.stockforge.inventory.application.ConfirmReservationUseCase;
 import com.stockforge.inventory.application.CreateProductUseCase;
 import com.stockforge.inventory.application.GetReservationUseCase;
 import com.stockforge.inventory.application.ProductCatalogQueries;
@@ -41,8 +42,17 @@ class UseCaseConfiguration {
     }
 
     @Bean
-    ProductCatalogQueries productCatalogQueries(ProductRepository products, InventoryRepository inventories) {
-        return new ProductCatalogQueries(products, inventories);
+    ProductCatalogQueries productCatalogQueries(
+            ProductRepository products,
+            InventoryRepository inventories,
+            com.stockforge.inventory.domain.port.ProductCache productCache) {
+        return new ProductCatalogQueries(products, inventories, productCache);
+    }
+
+    @Bean
+    @org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
+    com.stockforge.inventory.domain.port.ProductCache fallbackProductCache() {
+        return com.stockforge.inventory.domain.port.ProductCache.NO_OP;
     }
 
     @Bean
@@ -68,7 +78,23 @@ class UseCaseConfiguration {
     }
 
     @Bean
+    ConfirmReservationUseCase confirmReservationUseCase(
+            ReservationRepository reservations, InventoryRepository inventories, Clock clock) {
+        return new ConfirmReservationUseCase(reservations, inventories, clock);
+    }
+
+    @Bean
     GetReservationUseCase getReservationUseCase(ReservationRepository reservations) {
         return new GetReservationUseCase(reservations);
+    }
+
+    @Bean
+    com.stockforge.inventory.application.ExpireReservationsUseCase expireReservationsUseCase(
+            ReservationRepository reservations,
+            InventoryRepository inventories,
+            com.stockforge.inventory.domain.port.OutboxPublisher outbox,
+            Clock clock) {
+        return new com.stockforge.inventory.application.ExpireReservationsUseCase(
+                reservations, inventories, outbox, clock);
     }
 }
