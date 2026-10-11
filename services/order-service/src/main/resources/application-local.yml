@@ -1,0 +1,11 @@
+# Local development configuration against docker-compose stack
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/stockforge
+    username: order_svc
+    password: order_local_only
+
+logging:
+  structured:
+    format:
+      console: ""
