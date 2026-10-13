@@ -1,0 +1,90 @@
+groups:
+  - name: stockforge-alerts
+    rules:
+      - alert: StockInvariantViolation
+        expr: stockforge_inventory_invariant_violations > 0
+        for: 0m
+        labels:
+          severity: critical
+          team: platform-core
+        annotations:
+          summary: "Stock conservation invariant violation detected"
+          description: "Inventory reconciliation discovered a mismatch between physical stock and total reservations/sales, or negative available quantity."
+          runbook_url: "docs/runbooks/RUNBOOK-001-stock-invariant-violation.md"
+
+      - alert: DeadLetterQueueNotEmpty
+        expr: kafka_consumergroup_lag{topic=~".*-dlt"} > 0
+        for: 1m
+        labels:
+          severity: warning
+          team: platform-core
+        annotations:
+          summary: "Messages detected in Dead Letter Queue (DLT)"
+          description: "Dead letter queue contains failed events awaiting operator inspection or replay."
+          runbook_url: "docs/runbooks/RUNBOOK-002-dlq-messages-detected.md"
+
+      - alert: KafkaConsumerLagHigh
+        expr: kafka_consumergroup_lag > 500
+        for: 1m
+        labels:
+          severity: warning
+          team: platform-core
+        annotations:
+          summary: "Kafka consumer group lag exceeded 500 messages"
+          description: "Consumer group {{ $labels.group }} on topic {{ $labels.topic }} is falling behind by {{ $value }} messages."
+          runbook_url: "docs/runbooks/RUNBOOK-003-outbox-relay-lag.md"
+
+      - alert: OutboxEventStuck
+        expr: stockforge_outbox_oldest_pending_age_seconds > 60
+        for: 1m
+        labels:
+          severity: critical
+          team: platform-core
+        annotations:
+          summary: "Transactional outbox relay lag exceeded 60 seconds"
+          description: "Oldest pending outbox event age is {{ $value }}s in service {{ $labels.job }}, indicating relay stall or Kafka outage."
+          runbook_url: "docs/runbooks/RUNBOOK-003-outbox-relay-lag.md"
+
+      - alert: HikariPoolExhausted
+        expr: hikaricp_connections_pending > 0
+        for: 30s
+        labels:
+          severity: critical
+          team: platform-core
+        annotations:
+          summary: "HikariCP connection pool exhausted or pending callers queued"
+          description: "Threads are blocked waiting for database connections in pool {{ $labels.pool }} for >30s."
+          runbook_url: "docs/runbooks/RUNBOOK-004-connection-pool-starvation.md"
+
+      - alert: ReservationLatencyHigh
+        expr: histogram_quantile(0.99, sum(rate(http_server_requests_seconds_bucket{uri=~"/api/v1/reservations.*"}[1m])) by (le)) > 0.05
+        for: 1m
+        labels:
+          severity: warning
+          team: platform-core
+        annotations:
+          summary: "P99 reservation latency exceeded 50ms (SLO violation)"
+          description: "P99 latency is currently {{ $value }}s, breaching the 50ms latency objective under SLO-1."
+          runbook_url: "docs/observability/slos.md"
+
+      - alert: CircuitBreakerOpen
+        expr: resilience4j_circuitbreaker_state{state="open"} == 1
+        for: 15s
+        labels:
+          severity: critical
+          team: platform-core
+        annotations:
+          summary: "Circuit breaker opened for downstream service"
+          description: "Resilience4j circuit breaker {{ $labels.name }} opened in {{ $labels.job }} due to high error rate or slow responses."
+          runbook_url: "docs/runbooks/RUNBOOK-005-circuit-breaker-open.md"
+
+      - alert: HighHttp5xxErrorRate
+        expr: (sum(rate(http_server_requests_seconds_count{status=~"5.."}[1m])) / sum(rate(http_server_requests_seconds_count[1m]))) > 0.01
+        for: 1m
+        labels:
+          severity: critical
+          team: platform-core
+        annotations:
+          summary: "HTTP 5xx error rate exceeded 1%"
+          description: "Overall 5xx failure rate across StockForge services reached {{ $value | humanizePercentage }}, consuming error budget."
+          runbook_url: "docs/observability/slos.md"

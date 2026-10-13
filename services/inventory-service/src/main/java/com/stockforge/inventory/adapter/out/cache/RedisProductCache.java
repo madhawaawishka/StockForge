@@ -9,6 +9,9 @@ import com.stockforge.inventory.domain.model.ProductId;
 import com.stockforge.inventory.domain.model.ProductStatus;
 import com.stockforge.inventory.domain.model.Sku;
 import com.stockforge.inventory.domain.port.ProductCache;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
@@ -17,6 +20,7 @@ import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
@@ -34,21 +38,38 @@ class RedisProductCache implements ProductCache {
 
     private final StringRedisTemplate redis;
     private final ObjectMapper objectMapper;
+    private final CircuitBreaker circuitBreaker;
 
-    RedisProductCache(StringRedisTemplate redis, ObjectMapper objectMapper) {
+    RedisProductCache(
+            StringRedisTemplate redis,
+            ObjectMapper objectMapper,
+            ObjectProvider<CircuitBreakerRegistry> circuitBreakerRegistryProvider) {
         this.redis = redis;
         this.objectMapper = objectMapper;
+        CircuitBreakerRegistry registry =
+                circuitBreakerRegistryProvider != null ? circuitBreakerRegistryProvider.getIfAvailable() : null;
+        this.circuitBreaker = registry != null
+                ? registry.circuitBreaker("redisCatalogCache")
+                : CircuitBreaker.ofDefaults("redisCatalogCache");
+    }
+
+    RedisProductCache(StringRedisTemplate redis, ObjectMapper objectMapper) {
+        this(redis, objectMapper, null);
     }
 
     @Override
     public Optional<Product> getProduct(ProductId id) {
         String key = PRODUCT_KEY_PREFIX + id.value();
         try {
-            String json = redis.opsForValue().get(key);
+            String json =
+                    circuitBreaker.executeSupplier(() -> redis.opsForValue().get(key));
             if (json == null) {
                 return Optional.empty();
             }
             return Optional.of(deserializeProduct(json));
+        } catch (CallNotPermittedException e) {
+            log.warn("Redis circuit breaker is OPEN for key {}. Falling back to DB.", key);
+            return Optional.empty();
         } catch (Exception e) {
             log.warn("Redis read failure for key {}: {}. Falling back to DB.", key, e.getMessage());
             return Optional.empty();
@@ -83,11 +104,15 @@ class RedisProductCache implements ProductCache {
     public Optional<Inventory> getInventory(ProductId id) {
         String key = INVENTORY_KEY_PREFIX + id.value();
         try {
-            String json = redis.opsForValue().get(key);
+            String json =
+                    circuitBreaker.executeSupplier(() -> redis.opsForValue().get(key));
             if (json == null) {
                 return Optional.empty();
             }
             return Optional.of(deserializeInventory(json));
+        } catch (CallNotPermittedException e) {
+            log.warn("Redis circuit breaker is OPEN for inventory key {}. Falling back to DB.", key);
+            return Optional.empty();
         } catch (Exception e) {
             log.warn("Redis read failure for inventory key {}: {}", key, e.getMessage());
             return Optional.empty();

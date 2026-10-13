@@ -1,6 +1,10 @@
 package com.stockforge.order.adapter.out.messaging;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.stockforge.events.DomainEvents;
+import io.micrometer.core.instrument.MeterRegistry;
+import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Clock;
@@ -9,6 +13,8 @@ import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -25,28 +31,41 @@ public class OutboxRelayWorker {
 
     private final JdbcClient jdbc;
     private final KafkaTemplate<String, String> kafkaTemplate;
+    private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final AtomicLong oldestPendingAgeSeconds = new AtomicLong(0);
 
-    public OutboxRelayWorker(JdbcClient jdbc, KafkaTemplate<String, String> kafkaTemplate, Clock clock) {
+    public OutboxRelayWorker(
+            JdbcClient jdbc,
+            KafkaTemplate<String, String> kafkaTemplate,
+            ObjectMapper objectMapper,
+            Clock clock,
+            MeterRegistry meterRegistry) {
         this.jdbc = jdbc;
         this.kafkaTemplate = kafkaTemplate;
+        this.objectMapper = objectMapper;
         this.clock = clock;
+        if (meterRegistry != null) {
+            meterRegistry.gauge("stockforge.outbox.oldest.pending.age.seconds", oldestPendingAgeSeconds);
+        }
     }
 
     public record OutboxRecord(
-            UUID id,
-            String aggregateType,
-            String aggregateId,
-            String eventType,
-            String payload,
-            String correlationId) {}
+            UUID id, String aggregateType, String aggregateId, String eventType, String payload, String headers) {}
 
     @Scheduled(fixedDelayString = "${stockforge.outbox.poll-interval-ms:500}")
     @Transactional
     public void relayPendingEvents() {
+        Double oldestAge = jdbc.sql("""
+                SELECT EXTRACT(EPOCH FROM (now() - MIN(created_at)))
+                FROM outbox_events
+                WHERE status = 'PENDING'
+                """).query(Double.class).optional().orElse(0.0);
+        oldestPendingAgeSeconds.set(oldestAge != null ? oldestAge.longValue() : 0);
+
         List<OutboxRecord> pending =
                 jdbc.sql("""
-                        SELECT id, aggregate_type, aggregate_id, event_type, payload, correlation_id
+                        SELECT id, aggregate_type, aggregate_id, event_type, payload, headers
                         FROM outbox_events
                         WHERE status = 'PENDING'
                         ORDER BY created_at
@@ -64,9 +83,12 @@ public class OutboxRelayWorker {
             String topic = resolveTopic(record.eventType());
             try {
                 if (kafkaTemplate != null) {
-                    kafkaTemplate
-                            .send(topic, record.aggregateId(), record.payload())
-                            .get(5, java.util.concurrent.TimeUnit.SECONDS);
+                    ProducerRecord<String, String> producerRecord =
+                            new ProducerRecord<>(topic, null, record.aggregateId(), record.payload());
+
+                    extractAndAttachHeaders(record.headers(), producerRecord);
+
+                    kafkaTemplate.send(producerRecord).get(5, java.util.concurrent.TimeUnit.SECONDS);
                 }
                 jdbc.sql("""
                                 UPDATE outbox_events
@@ -92,6 +114,27 @@ public class OutboxRelayWorker {
         }
     }
 
+    private void extractAndAttachHeaders(String headersJson, ProducerRecord<String, String> producerRecord) {
+        if (headersJson == null || headersJson.isBlank()) {
+            return;
+        }
+        try {
+            JsonNode node = objectMapper.readTree(headersJson);
+            if (node.hasNonNull("traceparent")) {
+                producerRecord
+                        .headers()
+                        .add("traceparent", node.get("traceparent").asText().getBytes(StandardCharsets.UTF_8));
+            }
+            if (node.hasNonNull("correlationId")) {
+                producerRecord
+                        .headers()
+                        .add("correlationId", node.get("correlationId").asText().getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Exception e) {
+            log.warn("Failed to parse headers JSON for outbox event: {}", e.getMessage());
+        }
+    }
+
     private static OutboxRecord mapRow(ResultSet rs, int rowNum) throws SQLException {
         return new OutboxRecord(
                 rs.getObject("id", UUID.class),
@@ -99,7 +142,7 @@ public class OutboxRelayWorker {
                 rs.getString("aggregate_id"),
                 rs.getString("event_type"),
                 rs.getString("payload"),
-                rs.getString("correlation_id"));
+                rs.getString("headers"));
     }
 
     private static String resolveTopic(String eventType) {

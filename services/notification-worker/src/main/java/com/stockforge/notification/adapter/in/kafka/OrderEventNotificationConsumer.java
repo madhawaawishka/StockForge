@@ -40,16 +40,18 @@ class OrderEventNotificationConsumer {
 
     @KafkaListener(topics = DomainEvents.TOPIC_ORDER_EVENTS, groupId = CONSUMER_GROUP)
     public void onMessage(ConsumerRecord<String, String> record) {
-        String eventId = record.key() != null ? record.key() : UUID.randomUUID().toString();
-        Instant now = clock.instant();
-
-        boolean isNew = inbox.tryAcquire(CONSUMER_GROUP, eventId, now);
-        if (!isNew) {
-            log.info("Duplicate order event ignored in notification worker for key: {}", eventId);
-            return;
-        }
-
+        extractTraceContext(record);
         try {
+            String eventId =
+                    record.key() != null ? record.key() : UUID.randomUUID().toString();
+            Instant now = clock.instant();
+
+            boolean isNew = inbox.tryAcquire(CONSUMER_GROUP, eventId, now);
+            if (!isNew) {
+                log.info("Duplicate order event ignored in notification worker for key: {}", eventId);
+                return;
+            }
+
             JsonNode root = objectMapper.readTree(record.value());
             if (!root.has("orderId") || !root.has("userId")) {
                 log.warn("Order event missing orderId or userId: {}", record.value());
@@ -74,6 +76,31 @@ class OrderEventNotificationConsumer {
         } catch (Exception e) {
             log.error("Failed handling order notification event: {}", e.getMessage(), e);
             throw new IllegalStateException("Error processing order notification event", e);
+        } finally {
+            clearTraceContext();
         }
+    }
+
+    private void extractTraceContext(ConsumerRecord<?, ?> record) {
+        if (record.headers() != null) {
+            org.apache.kafka.common.header.Header header = record.headers().lastHeader("traceparent");
+            if (header != null && header.value() != null) {
+                String tp = new String(header.value(), java.nio.charset.StandardCharsets.UTF_8);
+                if (tp.length() >= 53 && tp.charAt(2) == '-' && tp.charAt(35) == '-') {
+                    String traceId = tp.substring(3, 35);
+                    int nextDash = tp.indexOf('-', 36);
+                    if (nextDash > 36) {
+                        String spanId = tp.substring(36, nextDash);
+                        org.slf4j.MDC.put("traceId", traceId);
+                        org.slf4j.MDC.put("spanId", spanId);
+                    }
+                }
+            }
+        }
+    }
+
+    private void clearTraceContext() {
+        org.slf4j.MDC.remove("traceId");
+        org.slf4j.MDC.remove("spanId");
     }
 }

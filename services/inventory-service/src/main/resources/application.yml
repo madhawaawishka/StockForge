@@ -33,7 +33,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,prometheus
+        include: health,info,prometheus,metrics
   endpoint:
     health:
       probes:
@@ -43,9 +43,26 @@ management:
         # does not make the orchestrator restart every instance (spec §33).
         readiness:
           include: readinessState,db
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
+  otlp:
+    tracing:
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318/v1/traces}
   info:
     build:
       enabled: true
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      redisCatalogCache:
+        sliding-window-size: 20
+        failure-rate-threshold: 50
+        slow-call-duration-threshold: 100ms
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 5
+        register-health-indicator: true
 
 springdoc:
   # Opt-in: a deployed service does not publish its API surface unless asked to (spec §28).

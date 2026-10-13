@@ -1,7 +1,9 @@
 package com.stockforge.inventory.adapter.in.scheduler;
 
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -15,9 +17,13 @@ public class InventoryReconciliationJob {
     private static final Logger log = LoggerFactory.getLogger(InventoryReconciliationJob.class);
 
     private final JdbcClient jdbc;
+    private final AtomicInteger invariantViolationsGauge = new AtomicInteger(0);
 
-    public InventoryReconciliationJob(JdbcClient jdbc) {
+    public InventoryReconciliationJob(JdbcClient jdbc, MeterRegistry meterRegistry) {
         this.jdbc = jdbc;
+        if (meterRegistry != null) {
+            meterRegistry.gauge("stockforge.inventory.invariant.violations", invariantViolationsGauge);
+        }
     }
 
     @Scheduled(fixedDelayString = "${stockforge.reconciliation.interval-ms:60000}")

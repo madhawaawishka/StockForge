@@ -18,6 +18,10 @@ import com.stockforge.inventory.v1.ListProductsResponse;
 import com.stockforge.inventory.v1.ProductDto;
 import com.stockforge.inventory.v1.ReserveStockRequest;
 import com.stockforge.inventory.v1.ReserveStockResponse;
+import io.github.resilience4j.bulkhead.Bulkhead;
+import io.github.resilience4j.bulkhead.BulkheadRegistry;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import java.util.ArrayList;
@@ -25,6 +29,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -32,20 +38,43 @@ public class GrpcInventoryClient implements InventoryClient {
 
     private static final long DEADLINE_SECONDS = 2;
     private final InventoryServiceGrpc.InventoryServiceBlockingStub stub;
+    private final CircuitBreaker circuitBreaker;
+    private final Bulkhead bulkhead;
+
+    public GrpcInventoryClient(
+            InventoryServiceGrpc.InventoryServiceBlockingStub stub,
+            ObjectProvider<CircuitBreakerRegistry> circuitBreakerRegistryProvider,
+            ObjectProvider<BulkheadRegistry> bulkheadRegistryProvider) {
+        this.stub = Objects.requireNonNull(stub, "stub must not be null");
+        CircuitBreakerRegistry cbRegistry =
+                circuitBreakerRegistryProvider != null ? circuitBreakerRegistryProvider.getIfAvailable() : null;
+        this.circuitBreaker = cbRegistry != null
+                ? cbRegistry.circuitBreaker("inventoryService")
+                : CircuitBreaker.ofDefaults("inventoryService");
+        BulkheadRegistry bhRegistry =
+                bulkheadRegistryProvider != null ? bulkheadRegistryProvider.getIfAvailable() : null;
+        this.bulkhead =
+                bhRegistry != null ? bhRegistry.bulkhead("inventoryService") : Bulkhead.ofDefaults("inventoryService");
+    }
 
     public GrpcInventoryClient(InventoryServiceGrpc.InventoryServiceBlockingStub stub) {
-        this.stub = Objects.requireNonNull(stub, "stub must not be null");
+        this(stub, null, null);
     }
 
     private InventoryServiceGrpc.InventoryServiceBlockingStub withDeadline() {
         return stub.withDeadlineAfter(DEADLINE_SECONDS, TimeUnit.SECONDS);
     }
 
+    private <T> T execute(Supplier<T> supplier) {
+        return Bulkhead.decorateSupplier(bulkhead, CircuitBreaker.decorateSupplier(circuitBreaker, supplier))
+                .get();
+    }
+
     @Override
     public Optional<ProductView> getProduct(String id) {
         try {
-            GetProductResponse response = withDeadline()
-                    .getProduct(GetProductRequest.newBuilder().setProductId(id).build());
+            GetProductResponse response = execute(() -> withDeadline()
+                    .getProduct(GetProductRequest.newBuilder().setProductId(id).build()));
             return Optional.of(toProductView(response.getProduct()));
         } catch (StatusRuntimeException e) {
             if (e.getStatus().getCode() == Status.Code.NOT_FOUND) {
@@ -61,7 +90,7 @@ public class GrpcInventoryClient implements InventoryClient {
         if (cursor != null && !cursor.isBlank()) {
             req.setCursor(cursor);
         }
-        ListProductsResponse response = withDeadline().listProducts(req.build());
+        ListProductsResponse response = execute(() -> withDeadline().listProducts(req.build()));
         List<ProductView> result = new ArrayList<>();
         for (ProductDto dto : response.getProductsList()) {
             result.add(toProductView(dto));
@@ -72,10 +101,10 @@ public class GrpcInventoryClient implements InventoryClient {
     @Override
     public Optional<AvailabilityView> getAvailability(String productId) {
         try {
-            GetAvailabilityResponse response = withDeadline()
+            GetAvailabilityResponse response = execute(() -> withDeadline()
                     .getAvailability(GetAvailabilityRequest.newBuilder()
                             .setProductId(productId)
-                            .build());
+                            .build()));
             return Optional.of(new AvailabilityView(response.getProductId(), response.getAvailableQuantity(), false));
         } catch (StatusRuntimeException e) {
             if (e.getStatus().getCode() == Status.Code.NOT_FOUND) {
@@ -93,7 +122,7 @@ public class GrpcInventoryClient implements InventoryClient {
                 .setUserId(userId)
                 .setQuantity(quantity)
                 .build();
-        ReserveStockResponse response = withDeadline().reserveStock(request);
+        ReserveStockResponse response = execute(() -> withDeadline().reserveStock(request));
         return new ReservationView(
                 response.getReservationId(),
                 productId,
@@ -106,10 +135,10 @@ public class GrpcInventoryClient implements InventoryClient {
     @Override
     public Optional<ReservationView> getReservation(String id) {
         try {
-            GetReservationResponse response = withDeadline()
+            GetReservationResponse response = execute(() -> withDeadline()
                     .getReservation(GetReservationRequest.newBuilder()
                             .setReservationId(id)
-                            .build());
+                            .build()));
             return Optional.of(new ReservationView(
                     response.getReservationId(),
                     response.getProductId(),
@@ -127,11 +156,11 @@ public class GrpcInventoryClient implements InventoryClient {
 
     @Override
     public ReservationView cancelReservation(String id, String userId) {
-        CancelReservationResponse response = withDeadline()
+        CancelReservationResponse response = execute(() -> withDeadline()
                 .cancelReservation(CancelReservationRequest.newBuilder()
                         .setReservationId(id)
                         .setUserId(userId)
-                        .build());
+                        .build()));
         return new ReservationView(response.getReservationId(), "", userId, 0, response.getStatus(), "");
     }
 

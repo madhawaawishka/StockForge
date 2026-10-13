@@ -11,6 +11,10 @@ import com.stockforge.order.v1.ListOrdersRequest;
 import com.stockforge.order.v1.ListOrdersResponse;
 import com.stockforge.order.v1.OrderItemDto;
 import com.stockforge.order.v1.OrderServiceGrpc;
+import io.github.resilience4j.bulkhead.Bulkhead;
+import io.github.resilience4j.bulkhead.BulkheadRegistry;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import java.util.ArrayList;
@@ -18,6 +22,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -25,13 +31,35 @@ public class GrpcOrderClient implements OrderClient {
 
     private static final long DEADLINE_SECONDS = 2;
     private final OrderServiceGrpc.OrderServiceBlockingStub stub;
+    private final CircuitBreaker circuitBreaker;
+    private final Bulkhead bulkhead;
+
+    public GrpcOrderClient(
+            OrderServiceGrpc.OrderServiceBlockingStub stub,
+            ObjectProvider<CircuitBreakerRegistry> circuitBreakerRegistryProvider,
+            ObjectProvider<BulkheadRegistry> bulkheadRegistryProvider) {
+        this.stub = Objects.requireNonNull(stub, "stub must not be null");
+        CircuitBreakerRegistry cbRegistry =
+                circuitBreakerRegistryProvider != null ? circuitBreakerRegistryProvider.getIfAvailable() : null;
+        this.circuitBreaker = cbRegistry != null
+                ? cbRegistry.circuitBreaker("orderService")
+                : CircuitBreaker.ofDefaults("orderService");
+        BulkheadRegistry bhRegistry =
+                bulkheadRegistryProvider != null ? bulkheadRegistryProvider.getIfAvailable() : null;
+        this.bulkhead = bhRegistry != null ? bhRegistry.bulkhead("orderService") : Bulkhead.ofDefaults("orderService");
+    }
 
     public GrpcOrderClient(OrderServiceGrpc.OrderServiceBlockingStub stub) {
-        this.stub = Objects.requireNonNull(stub, "stub must not be null");
+        this(stub, null, null);
     }
 
     private OrderServiceGrpc.OrderServiceBlockingStub withDeadline() {
         return stub.withDeadlineAfter(DEADLINE_SECONDS, TimeUnit.SECONDS);
+    }
+
+    private <T> T execute(Supplier<T> supplier) {
+        return Bulkhead.decorateSupplier(bulkhead, CircuitBreaker.decorateSupplier(circuitBreaker, supplier))
+                .get();
     }
 
     @Override
@@ -42,7 +70,7 @@ public class GrpcOrderClient implements OrderClient {
                 .setUserId(userId)
                 .setReservationId(reservationId)
                 .build();
-        CreateOrderResponse response = withDeadline().createOrder(request);
+        CreateOrderResponse response = execute(() -> withDeadline().createOrder(request));
         return new OrderView(
                 response.getOrderId(),
                 response.getUserId(),
@@ -57,8 +85,8 @@ public class GrpcOrderClient implements OrderClient {
     @Override
     public Optional<OrderView> getOrder(String id) {
         try {
-            GetOrderResponse response = withDeadline()
-                    .getOrder(GetOrderRequest.newBuilder().setOrderId(id).build());
+            GetOrderResponse response = execute(() -> withDeadline()
+                    .getOrder(GetOrderRequest.newBuilder().setOrderId(id).build()));
             return Optional.of(toOrderView(response));
         } catch (StatusRuntimeException e) {
             if (e.getStatus().getCode() == Status.Code.NOT_FOUND) {
@@ -70,11 +98,11 @@ public class GrpcOrderClient implements OrderClient {
 
     @Override
     public List<OrderView> listOrders(String userId, int limit) {
-        ListOrdersResponse response = withDeadline()
+        ListOrdersResponse response = execute(() -> withDeadline()
                 .listOrders(ListOrdersRequest.newBuilder()
                         .setUserId(userId)
                         .setLimit(limit)
-                        .build());
+                        .build()));
         List<OrderView> result = new ArrayList<>();
         for (GetOrderResponse orderResp : response.getOrdersList()) {
             result.add(toOrderView(orderResp));
