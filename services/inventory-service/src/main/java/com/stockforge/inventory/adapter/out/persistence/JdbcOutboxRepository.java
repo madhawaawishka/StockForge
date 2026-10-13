@@ -40,13 +40,21 @@ class JdbcOutboxRepository implements OutboxPublisher {
             throw new IllegalArgumentException("Failed to serialize outbox event payload", e);
         }
 
+        Map<String, String> headerMap = new java.util.HashMap<>();
+        headerMap.put("correlationId", correlationId != null ? correlationId : "");
+        headerMap.put("eventType", eventType);
+        headerMap.put("aggregateType", aggregateType);
+        headerMap.put("aggregateId", aggregateId);
+
+        String traceId = org.slf4j.MDC.get("traceId");
+        String spanId = org.slf4j.MDC.get("spanId");
+        if (traceId != null && spanId != null && !traceId.isBlank() && !spanId.isBlank()) {
+            headerMap.put("traceparent", "00-" + traceId + "-" + spanId + "-01");
+        }
+
         String headersJson;
         try {
-            headersJson = objectMapper.writeValueAsString(Map.of(
-                    "correlationId", correlationId,
-                    "eventType", eventType,
-                    "aggregateType", aggregateType,
-                    "aggregateId", aggregateId));
+            headersJson = objectMapper.writeValueAsString(headerMap);
         } catch (JsonProcessingException e) {
             headersJson = "{}";
         }

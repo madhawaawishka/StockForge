@@ -138,6 +138,10 @@ final class ApiProblems {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, detail);
         problem.setType(URI.create(TYPE_BASE_URI + slug));
         problem.setTitle(title);
+        String traceId = org.slf4j.MDC.get("traceId");
+        if (traceId != null && !traceId.isBlank()) {
+            problem.setProperty("traceId", traceId);
+        }
         return problem;
     }
 }

@@ -26,6 +26,10 @@ spring:
     producer:
       acks: all
       retries: 3
+    listener:
+      observation-enabled: true
+    template:
+      observation-enabled: true
   jackson:
     deserialization:
       fail-on-unknown-properties: true
@@ -42,7 +46,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,prometheus
+        include: health,info,prometheus,metrics
   endpoint:
     health:
       probes:
@@ -50,9 +54,22 @@ management:
       group:
         readiness:
           include: readinessState,db
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
+  otlp:
+    tracing:
+      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318/v1/traces}
   info:
     build:
       enabled: true
+
+resilience4j:
+  bulkhead:
+    instances:
+      dltReplay:
+        max-concurrent-calls: 1
+        max-wait-duration: 0ms
 
 logging:
   structured:

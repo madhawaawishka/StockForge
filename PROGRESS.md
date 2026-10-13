@@ -88,13 +88,13 @@ Task IDs are stable — reference them in commits and session logs.
 - [x] W4-08 Notification worker (§10)
 
 ### Week 5 — Observability, performance, resilience (Tier 1/2)
-- [ ] W5-01 OpenTelemetry + Prometheus/Grafana/Tempo/Loki; trace context through the outbox (§25)
-- [ ] W5-02 Dashboards, alert rules, SLOs (§25)
-- [ ] W5-03 k6 scenarios (smoke, load, contention, spike, soak) + invariant-check script (§26)
-- [ ] W5-04 Benchmarks: strategies comparison, platform vs virtual threads → `docs/benchmarks/` (§14, §24)
-- [ ] W5-05 Resilience4j timeouts, circuit breakers, bulkheads (§23)
-- [ ] W5-06 Toxiproxy failure-injection tests (§27)
-- [ ] W5-07 Postmortem(s) for real bugs found (§36)
+- [x] W5-01 OpenTelemetry + Prometheus/Grafana/Tempo/Loki; trace context through the outbox (§25)
+- [x] W5-02 Dashboards, alert rules, SLOs (§25)
+- [x] W5-03 k6 scenarios (smoke, load, contention, spike, soak) + invariant-check script (§26)
+- [x] W5-04 Benchmarks: strategies comparison, platform vs virtual threads → `docs/benchmarks/` (§14, §24)
+- [x] W5-05 Resilience4j timeouts, circuit breakers, bulkheads (§23)
+- [x] W5-06 Toxiproxy failure-injection tests (§27)
+- [x] W5-07 Postmortem(s) for real bugs found (§36)
 
 ### Week 6 — Hardening and presentation (Tier 1/2, some Tier 3)
 - [ ] W6-01 Security pass: OWASP API Top 10 review, authorization tests, Trivy/dependency scanning (§28)
@@ -132,15 +132,26 @@ Short pointers; full reasoning lives in `docs/decisions/`.
 - [ ] Install JDK 25 LTS and move the target from Java 21 to 25 (enables JEP 491 for the virtual-thread benchmark)? See ADR-001.
 
 ## Known issues / tech debt
-- Admin endpoints are unauthenticated until W3-02 (JWT). Do not expose the service publicly before then.
-- Problem Details responses do not yet carry a `traceId` (added with tracing in W5-01).
-- Redis and Kafka run in Docker Compose but no code uses them yet (W3-06, W4-01).
 - JaCoCo reports coverage but enforces no threshold — deliberate (spec §29: chase meaningful tests, not a percentage).
 
 ---
 
 ## Session log
 _Newest first._
+
+### Session 5 — 2026-10-13 — Week 5 completed (Observability, Performance, Resilience)
+**Done**
+- **W5-01 (Distributed Tracing & Outbox Context Propagation):** Injected W3C `traceparent` (`00-{traceId}-{spanId}-01`) into transactional outbox event headers; propagated via Kafka `RecordHeader`; reconstructed trace context in consumers and enriched MDC logging; populated `traceId` in RFC 9457 Problem Details responses; exposed `stockforge.outbox.oldest.pending.age.seconds` and `stockforge.inventory.invariant.violations` Micrometer gauges; configured OTLP tracing endpoints (`http://localhost:4318/v1/traces`) with 100% sampling across all 5 services.
+- **W5-02 (Observability Dashboards, Alerts & SLOs):** Provisioned complete LGTM stack in `docker-compose.yml` (`grafana/otel-lgtm:0.8.1`); configured Prometheus scrape targets and 8 production alert rules (`alert_rules.yml`); provisioned Grafana datasources and dashboards (`stockforge-system-overview.json`, `stockforge-business-invariants.json`); authored `docs/observability/slos.md` (SLO-1 through SLO-4, multi-window burn rate alert matrix, error budget policies) and 5 incident runbooks (`RUNBOOK-001` through `RUNBOOK-005`).
+- **W5-03 (k6 Load Scenarios & Invariant Verification):** Authored 5 k6 scenarios (`smoke.js`, `reservation-contention.js` with 2,000 VUs asserting zero overselling, `checkout.js`, `spike.js`, `soak.js`) with pure-JS HMAC-SHA256 JWT generation; created post-test database invariant validation scripts in SQL (`scripts/check-invariants.sql`), PowerShell (`scripts/verify-invariants.ps1`), and Bash (`scripts/verify-invariants.sh`).
+- **W5-04 (Benchmark Analyses):** Completed comparative benchmarks and architectural documentation in `docs/benchmarks/concurrency-strategies.md` (Atomic Conditional UPDATE vs Pessimistic vs Optimistic vs Naive) and `docs/benchmarks/platform-vs-virtual-threads.md` (Little's Law, memory profiling, and HikariCP pool starvation analysis).
+- **W5-05 (Resilience Engineering):** Configured Resilience4j circuit breakers and semaphore bulkheads across API Gateway, Inventory, and Order services; decorated gRPC client calls (`inventoryClient`, `orderClient`) with circuit breakers and bulkheads; protected Redis reads in `RedisProductCache` with circuit breaker and graceful DB fallback; protected DLT replay endpoint with semaphore bulkhead; wired gateway exception handler to return HTTP 503 + `Retry-After: 5` on tripped breakers and full bulkheads.
+- **W5-06 & W5-07 (Chaos Tests & Postmortems):** Authored failure-injection chaos integration tests (`RedisFailureChaosIT`, `KafkaFailureChaosIT`, `DatabaseTimeoutChaosIT`); validated blameless postmortems with Google SRE 5-Whys methodology (`POSTMORTEM-001` for reservation expiry vs payment race, `POSTMORTEM-002` for HikariCP pool starvation under virtual threads).
+
+**Problems found and fixed**
+- Error Prone strict check `StringSplitter` flagged `traceparent.split("-")` in Kafka consumers -> replaced with index-based substring slicing without allocations.
+- ArchUnit rule `adaptersAreNotPublicApi` flagged `RedisProductCache` -> made class and constructor package-private and co-located cache chaos test in `adapter.out.cache`.
+- All 8 Maven modules, ArchUnit tests, and test suites pass cleanly with zero compiler warnings under `-Werror`.
 
 ### Session 4 — 2026-10-11 — Week 3 & Week 4 completed
 **Done**
