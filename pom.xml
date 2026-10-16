@@ -40,7 +40,7 @@
         <palantir-java-format.version>2.102.0</palantir-java-format.version>
         <jacoco.version>0.8.15</jacoco.version>
         <errorprone.version>2.50.0</errorprone.version>
-        <grpc.version>1.69.0</grpc.version>
+        <grpc.version>1.84.2</grpc.version>
         <protobuf.version>3.25.5</protobuf.version>
         <os-maven-plugin.version>1.7.1</os-maven-plugin.version>
         <protobuf-maven-plugin.version>0.6.1</protobuf-maven-plugin.version>
