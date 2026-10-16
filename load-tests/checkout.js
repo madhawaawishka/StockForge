@@ -1,60 +1,93 @@
+// Full checkout under load (spec §26 scenario 2): reserve -> order -> asynchronous payment -> terminal order status.
+// A share of payments is made to fail, so compensation (stock release) runs under load too.
+//
+//   k6 run -e PEAK_RATE=50 load-tests/checkout.js
+//   ./scripts/verify-invariants.sh        (afterwards: orders, payments and stock must agree)
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
-import { createToken, authHeaders } from './lib/auth.js';
-import { getBaseUrl, randomUuid } from './lib/helpers.js';
+import { jsonHeaders, token } from './lib/auth.js';
+import { BASE_URL, createProduct, uuid } from './lib/helpers.js';
 
-const completedCheckouts = new Counter('completed_checkouts');
-const checkoutE2eDuration = new Trend('checkout_e2e_duration_ms');
+const PEAK_RATE = parseInt(__ENV.PEAK_RATE || '50', 10);
+const FAILED_PAYMENT_SHARE = parseFloat(__ENV.FAILED_PAYMENT_SHARE || '0.1');
+
+const confirmed = new Counter('checkouts_confirmed');
+const compensated = new Counter('checkouts_compensated');
+const unfinished = new Counter('checkouts_unfinished');
+const checkoutDuration = new Trend('checkout_to_terminal_state', true);
 
 export const options = {
-  stages: [
-    { duration: '30s', target: 50 },
-    { duration: '1m', target: 200 },
-    { duration: '30s', target: 0 }
-  ],
+  scenarios: {
+    checkout: {
+      executor: 'ramping-arrival-rate',
+      startRate: 1,
+      timeUnit: '1s',
+      preAllocatedVUs: 50,
+      maxVUs: 1000,
+      stages: [
+        { duration: '30s', target: PEAK_RATE },
+        { duration: '2m', target: PEAK_RATE },
+        { duration: '15s', target: 0 },
+      ],
+    },
+  },
   thresholds: {
-    'checkout_e2e_duration_ms': ['p(95)<3000'],
-    'http_req_failed': ['rate<0.05']
-  }
+    http_req_failed: ['rate<0.01'],
+    checkouts_unfinished: ['count==0'],
+    checkout_to_terminal_state: ['p(95)<3000'],
+    'http_req_duration{name:POST /api/v1/reservations}': ['p(99)<300'],
+  },
+  summaryTrendStats: ['avg', 'p(50)', 'p(95)', 'p(99)', 'max'],
 };
 
-export default function() {
-  const baseUrl = getBaseUrl();
-  const userId = `018f6f5a-3d2b-7000-8000-${__VU.toString().padStart(12, '0')}`;
-  const token = createToken(userId);
-  const headers = authHeaders(token);
-  const productId = __ENV.PRODUCT_ID || '018f6f5a-3d2b-7000-8000-000000000100';
+export function setup() {
+  return { productId: createProduct(1_000_000) };
+}
 
-  const e2eStart = Date.now();
+export default function ({ productId }) {
+  const shopper = token(uuid());
+  const started = Date.now();
 
-  // 1. Reserve Stock
-  headers['Idempotency-Key'] = randomUuid();
-  const reservePayload = JSON.stringify({ productId, quantity: 1 });
-  const reserveRes = http.post(`${baseUrl}/api/v1/reservations`, reservePayload, { headers });
-
-  if (reserveRes.status !== 201) {
-    sleep(1);
+  const reserved = http.post(`${BASE_URL}/api/v1/reservations`, JSON.stringify({ productId, quantity: 1 }), {
+    headers: jsonHeaders(shopper, { 'Idempotency-Key': uuid() }),
+    tags: { name: 'POST /api/v1/reservations' },
+  });
+  if (!check(reserved, { 'reserved': (r) => r.status === 201 })) {
     return;
   }
 
-  const reservationId = reserveRes.json('reservationId');
-
-  // 2. Create Order
-  headers['Idempotency-Key'] = randomUuid();
-  const orderPayload = JSON.stringify({
-    reservationId: reservationId,
-    items: [{ productId: productId, quantity: 1, unitPrice: 29.99, currency: 'USD' }]
-  });
-  const orderRes = http.post(`${baseUrl}/api/v1/orders`, orderPayload, { headers });
-
-  if (orderRes.status === 201) {
-    completedCheckouts.add(1);
-    checkoutE2eDuration.add(Date.now() - e2eStart);
-    check(orderRes, {
-      'order created': (r) => r.json('orderId') !== undefined
-    });
+  const outcome = Math.random() < FAILED_PAYMENT_SHARE ? 'FAILED' : 'SUCCEEDED';
+  const placed = http.post(
+    `${BASE_URL}/api/v1/orders`,
+    JSON.stringify({ reservationId: reserved.json('id') }),
+    {
+      headers: jsonHeaders(shopper, { 'Idempotency-Key': uuid(), 'X-Payment-Simulation': outcome }),
+      tags: { name: 'POST /api/v1/orders' },
+    },
+  );
+  if (!check(placed, { 'order accepted': (r) => r.status === 202 })) {
+    return;
   }
 
-  sleep(1);
+  const orderUrl = `${BASE_URL}/api/v1/orders/${placed.json('id')}`;
+  let status = placed.json('status');
+  for (let attempt = 0; attempt < 80 && status === 'PENDING_PAYMENT'; attempt++) {
+    sleep(0.25);
+    status = http.get(orderUrl, { headers: jsonHeaders(shopper), tags: { name: 'GET /api/v1/orders/{id}' } })
+      .json('status');
+  }
+  checkoutDuration.add(Date.now() - started);
+
+  if (status === 'CONFIRMED') {
+    confirmed.add(1);
+  } else if (status === 'CANCELLED') {
+    compensated.add(1);
+  } else {
+    unfinished.add(1, { status: String(status) });
+  }
+  check(status, {
+    'the payment outcome decides the order': (s) =>
+      (outcome === 'SUCCEEDED' && s === 'CONFIRMED') || (outcome === 'FAILED' && s === 'CANCELLED'),
+  });
 }

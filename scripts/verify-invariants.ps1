@@ -1,27 +1,23 @@
-# Powershell script to verify business invariants via docker compose postgres or local psql
+# Runs scripts/check-invariants.sql against the local stack's database; exits non-zero on any violation.
+# Windows counterpart of verify-invariants.sh. Usage: .\scripts\verify-invariants.ps1
 param(
-    [string]$HostName = "localhost",
-    [int]$Port = 5432,
     [string]$Database = "stockforge",
     [string]$User = "stockforge_admin",
+    # Local-only credential of the docker compose stack (not a secret).
     [string]$Password = "admin_local_only"
 )
 
 $ErrorActionPreference = "Stop"
+$root = Split-Path -Parent $PSScriptRoot
+$sql = Join-Path $root "scripts\check-invariants.sql"
 
-Write-Host "Running StockForge Invariant Verification against $Database on $HostName:$Port..." -ForegroundColor Cyan
-
-$env:PGPASSWORD = $Password
-
-$cmd = "docker compose exec -T postgres psql -U $User -d $Database -f - < ./scripts/check-invariants.sql"
-if (-not (Get-Command "docker" -ErrorAction SilentlyContinue)) {
-    $cmd = "psql -h $HostName -p $Port -U $User -d $Database -f ./scripts/check-invariants.sql"
+Write-Host "Checking StockForge invariants in $Database..."
+# PowerShell has no '<' redirection: pipe the file into psql inside the PostgreSQL container instead.
+Get-Content -Raw -Encoding UTF8 $sql |
+    docker compose --project-directory $root exec -T -e "PGPASSWORD=$Password" postgres `
+        psql --no-psqlrc --quiet -U $User -d $Database -f -
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Invariant violations found (or the check could not run)." -ForegroundColor Red
+    exit $LASTEXITCODE
 }
-
-try {
-    Invoke-Expression $cmd
-    Write-Host "`nInvariant check completed successfully. Ensure all query tables above return (0 rows)." -ForegroundColor Green
-} catch {
-    Write-Host "`nError executing invariant verification: $_" -ForegroundColor Red
-    exit 1
-}
+Write-Host "All invariants hold." -ForegroundColor Green
