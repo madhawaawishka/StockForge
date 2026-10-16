@@ -1,43 +1,38 @@
-# RUNBOOK-003: Transactional Outbox Relay Lag
+# RUNBOOK-003: Outbox events stuck or slow
 
-## Severity: CRITICAL / HIGH
+**Alerts:**
+- `OutboxEventsStuck` — oldest unpublished event > 30 s for 1 min · critical
+- `OutboxPublishLagSloAtRisk` — > 5 % of events take over 1 s to reach Kafka (NFR-7) · warning
 
-## 1. Description
-The `OutboxEventStuck` alert fired because `stockforge_outbox_oldest_pending_age_seconds > 60` for more than 1 minute. Outbox events have accumulated in the database and are not being dispatched to Kafka topics.
+## What it means
+Business transactions keep succeeding — the outbox row is written in the same transaction — but their events are not
+reaching Kafka. Nothing is lost (ADR-008); every downstream step (payment, confirmation, notification) is delayed.
 
-## 2. Immediate Impact
-Asynchronous domain events (`OrderCreated`, `StockReserved`, `PaymentRequested`) are stalled. Downstream consumers will not process sagas, causing timeouts and stuck orders.
+## Confirm
+```promql
+max by (application) (stockforge_outbox_oldest_pending_age_seconds)
+sum by (application) (rate(stockforge_outbox_publish_failures_total[5m]))
+```
+```sql
+SELECT status, count(*), min(created_at), max(attempts), max(last_error)
+FROM ordering.outbox_events GROUP BY status;       -- or inventory. / payment.
+```
+`last_error` and the service log (`OutboxRelay … failed; it stays pending`) give the cause:
 
-## 3. Diagnosis Steps
-1. **Check Kafka Broker Availability:**
-   Verify if the Kafka broker is responding:
-   ```bash
-   kafka-broker-api-versions.sh --bootstrap-server localhost:9092
-   ```
-2. **Inspect the Outbox Table in the Affected Service:**
-   Query the pending outbox records to determine failure reason:
-   ```sql
-   SELECT id, event_type, status, attempts, last_error, created_at, NOW() - created_at AS lag_duration
-   FROM ordering.outbox_events
-   WHERE status = 'PENDING'
-   ORDER BY created_at ASC
-   LIMIT 10;
-   ```
-3. **Inspect Application Relay Logs:**
-   Filter logs in Loki or console for `OutboxRelayWorker`:
-   ```text
-   {application="order-service"} |= "OutboxRelayWorker"
-   ```
-   Look for `TimeoutException`, `LeaderNotAvailableException`, or serialization errors.
+| Symptom | Likely cause |
+| :--- | :--- |
+| `TimeoutException: Topic … not present in metadata` | broker unreachable or topic missing (auto-create is off) |
+| failures = 0 but age grows | relay not running: service down, or stuck holding the advisory lock |
+| age high only under load | relay batch too small or broker slow; check publish lag P95 |
 
-## 4. Remediation
-1. **Kafka Broker Down:** Restart or scale Kafka broker instance. Once Kafka resumes, `OutboxRelayWorker` will automatically resume draining the queue on the next scheduled tick (500ms).
-2. **Poison Pill Event:** If a specific event has invalid JSON or exceeds max message size:
-   Update its status to `FAILED` with an error note to allow subsequent messages to process:
-   ```sql
-   UPDATE ordering.outbox_events
-   SET status = 'FAILED', last_error = 'Quarantined by SRE operator: payload too large'
-   WHERE id = '<STUCK_EVENT_ID>';
-   ```
-3. **Verify Drain:**
-   Watch `stockforge_outbox_oldest_pending_age_seconds` gauge decrease to near 0.
+## Mitigate
+1. Broker down: restore Kafka (`docker compose ps kafka`, `docker compose restart kafka`). The backlog drains by itself
+   in `seq` order (`InventoryChaosIT` proves it).
+2. Topic missing: restart the owning service; it declares its topics at start-up.
+3. Relay not running: check the service's health; only one instance per schema relays at a time (advisory lock), so a
+   hung instance blocks others — restart it.
+4. Throughput: raise `stockforge.messaging.outbox.batch-size` or lower `poll-interval`.
+
+## Follow-up
+If events waited long enough for reservations to expire before payment completed, expect refunds
+(RUNBOOK-008, ADR-009).
