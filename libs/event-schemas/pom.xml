@@ -14,10 +14,23 @@
     <name>StockForge :: Event Schemas</name>
     <description>Shared event envelopes and schemas for asynchronous messaging (spec §18, §20)</description>
 
+    <!-- Contracts only: plain Java records with no runtime dependencies (spec §9 F). -->
     <dependencies>
+        <!-- Contract tests: the JSON form of every message is pinned by golden files -->
         <dependency>
-            <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-annotations</artifactId>
+            <groupId>tools.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 </project>

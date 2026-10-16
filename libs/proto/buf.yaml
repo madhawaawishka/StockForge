@@ -1,10 +1,12 @@
-# Buf configuration for StockForge Protocol Buffers (spec §12, §31, W3-01)
-version: v1
+# Buf configuration for the gRPC contracts (spec §12, §30).
+#   buf lint                                   style and naming rules
+#   buf breaking --against '<git>#branch=main'  rejects wire-incompatible changes in pull requests
+version: v2
+modules:
+  - path: src/main/proto
+lint:
+  use:
+    - STANDARD
 breaking:
   use:
     - FILE
-lint:
-  use:
-    - DEFAULT
-  except:
-    - PACKAGE_VERSION_SUFFIX
