@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars (git-ignored values only; no secrets are needed here — they are generated and stored in
+# AWS Secrets Manager by this configuration).
+region      = "eu-west-1"
+environment = "dev"
+image_tag   = "replace-with-the-git-sha-ci-pushed"
+
+# certificate_arn     = "arn:aws:acm:eu-west-1:123456789012:certificate/..."
+# db_multi_az         = true
+# deletion_protection = true
