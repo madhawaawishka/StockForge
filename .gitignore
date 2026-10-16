@@ -29,3 +29,14 @@ Thumbs.db
 
 # Load-test and benchmark scratch output (curated reports live in docs/benchmarks)
 load-tests/results/
+
+# jqwik's local record of failed property-test seeds (machine-specific)
+.jqwik-database
+
+# Terraform: local state and variable values never go to Git (the provider lock file does)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
