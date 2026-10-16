@@ -274,7 +274,7 @@ services:
   # Tools (profile "tools")
   # -------------------------------------------------------------------------------------------------------------
   kafka-ui:
-    image: ghcr.io/kafbat/kafka-ui:v1.3.0
+    image: ghcr.io/kafbat/kafka-ui:v1.5.0
     profiles: ["tools"]
     ports:
       - "8090:8080"
