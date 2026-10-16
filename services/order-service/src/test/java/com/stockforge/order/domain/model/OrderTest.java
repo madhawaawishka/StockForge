@@ -8,76 +8,105 @@ import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
+/** The order state machine and saga steps (spec §16 A). */
 class OrderTest {
 
-    private static final Instant NOW = Instant.parse("2026-10-09T10:00:00Z");
-    private static final OrderId ORDER_ID = OrderId.of(UUID.fromString("0192f5c4-7a1e-7c3b-9a55-2f1e4c8d9b10"));
-    private static final UserId USER_ID = UserId.of(UUID.fromString("0192f5c4-6b0d-7e21-8f43-1a2b3c4d5e6f"));
-    private static final ReservationId RESERVATION_ID =
-            ReservationId.of(UUID.fromString("0192f5c4-5a0c-7d10-8e32-0a1b2c3d4e5f"));
-    private static final ProductId PRODUCT_ID = ProductId.of(UUID.fromString("0192f5c4-4a0b-7c09-8d21-0a1b2c3d4e5f"));
+    private static final Instant NOW = Instant.parse("2026-10-08T10:15:30Z");
+    private static final Instant LATER = NOW.plusSeconds(30);
+    private static final UUID PAYMENT = UUID.randomUUID();
+
+    private static Order placed() {
+        return Order.place(
+                OrderId.of(UUID.randomUUID()),
+                UserId.of(UUID.randomUUID()),
+                ReservationId.of(UUID.randomUUID()),
+                List.of(
+                        new OrderItem(ProductId.of(UUID.randomUUID()), 2, Money.of("19.99", "USD")),
+                        new OrderItem(ProductId.of(UUID.randomUUID()), 1, Money.of("5.00", "USD"))),
+                NOW);
+    }
 
     @Test
-    void createsOrderInPendingPaymentStatusWithTotalCalculation() {
-        OrderItem item1 = new OrderItem(PRODUCT_ID, 2, Money.of("25.00", "USD"));
-        OrderItem item2 = new OrderItem(PRODUCT_ID, 1, Money.of("50.00", "USD"));
-
-        Order order = Order.create(ORDER_ID, USER_ID, RESERVATION_ID, List.of(item1, item2), NOW);
+    void aPlacedOrderWaitsForPaymentWithTheTotalOfItsPriceSnapshots() {
+        Order order = placed();
 
         assertThat(order.status()).isEqualTo(OrderStatus.PENDING_PAYMENT);
-        assertThat(order.totalAmount()).isEqualTo(Money.of("100.00", "USD"));
-        assertThat(order.history()).hasSize(1);
-        assertThat(order.history().getFirst().toStatus()).isEqualTo(OrderStatus.PENDING_PAYMENT);
+        assertThat(order.sagaStep()).isEqualTo(SagaStep.PAYMENT_REQUESTED);
+        assertThat(order.totalAmount()).isEqualTo(Money.of("44.98", "USD"));
+        assertThat(order.history())
+                .singleElement()
+                .satisfies(entry -> assertThat(entry.toStatus()).isEqualTo(OrderStatus.PENDING_PAYMENT));
     }
 
     @Test
-    void transitionsToConfirmed() {
-        OrderItem item = new OrderItem(PRODUCT_ID, 1, Money.of("100.00", "USD"));
-        Order order = Order.create(ORDER_ID, USER_ID, RESERVATION_ID, List.of(item), NOW);
-
-        Instant later = NOW.plusSeconds(30);
-        Order confirmed = order.confirm(later, "Payment succeeded");
+    void happyPathRecordsEveryStatusChange() {
+        Order confirmed = placed().paymentSucceeded(PAYMENT, NOW).confirm(LATER);
 
         assertThat(confirmed.status()).isEqualTo(OrderStatus.CONFIRMED);
-        assertThat(confirmed.history()).hasSize(2);
-        assertThat(confirmed.history().get(1).toStatus()).isEqualTo(OrderStatus.CONFIRMED);
-        assertThat(confirmed.history().get(1).reason()).isEqualTo("Payment succeeded");
+        assertThat(confirmed.sagaStep()).isEqualTo(SagaStep.COMPLETED);
+        assertThat(confirmed.paymentId()).contains(PAYMENT);
+        assertThat(confirmed.history())
+                .extracting(OrderStatusHistoryEntry::toStatus)
+                .containsExactly(OrderStatus.PENDING_PAYMENT, OrderStatus.CONFIRMED);
     }
 
     @Test
-    void transitionsToCancelled() {
-        OrderItem item = new OrderItem(PRODUCT_ID, 1, Money.of("100.00", "USD"));
-        Order order = Order.create(ORDER_ID, USER_ID, RESERVATION_ID, List.of(item), NOW);
+    void refundPathAfterTheReservationWasLost() {
+        Order refunded = placed().paymentSucceeded(PAYMENT, NOW)
+                .refundPending("Reservation EXPIRED", LATER)
+                .refunded(LATER);
 
-        Instant later = NOW.plusSeconds(30);
-        Order cancelled = order.cancel(later, "Payment failed");
-
-        assertThat(cancelled.status()).isEqualTo(OrderStatus.CANCELLED);
-        assertThat(cancelled.history()).hasSize(2);
+        assertThat(refunded.history())
+                .extracting(OrderStatusHistoryEntry::toStatus)
+                .containsExactly(OrderStatus.PENDING_PAYMENT, OrderStatus.REFUND_PENDING, OrderStatus.REFUNDED);
     }
 
     @Test
-    void transitionsToRefundPendingThenRefunded() {
-        OrderItem item = new OrderItem(PRODUCT_ID, 1, Money.of("100.00", "USD"));
-        Order order = Order.create(ORDER_ID, USER_ID, RESERVATION_ID, List.of(item), NOW);
+    void anOrderWhosePaymentSucceededCanNoLongerBeCancelledByTheTimeout() {
+        Order paid = placed().paymentSucceeded(PAYMENT, NOW);
 
-        Instant t1 = NOW.plusSeconds(30);
-        Order refundPending = order.refundPending(t1, "Reservation expired before confirmation");
-        assertThat(refundPending.status()).isEqualTo(OrderStatus.REFUND_PENDING);
-
-        Instant t2 = t1.plusSeconds(10);
-        Order refunded = refundPending.refund(t2, "Refund processed");
-        assertThat(refunded.status()).isEqualTo(OrderStatus.REFUNDED);
+        assertThatThrownBy(() -> paid.cancel("timeout", LATER)).isInstanceOf(DomainValidationException.class);
     }
 
     @Test
-    void rejectsTransitionFromTerminalState() {
-        OrderItem item = new OrderItem(PRODUCT_ID, 1, Money.of("100.00", "USD"));
-        Order order = Order.create(ORDER_ID, USER_ID, RESERVATION_ID, List.of(item), NOW);
-        Order confirmed = order.confirm(NOW.plusSeconds(10), "Paid");
+    void terminalStatesAreFinal() {
+        Order cancelled = placed().cancel("Payment failed", LATER);
 
-        assertThatThrownBy(() -> confirmed.cancel(NOW.plusSeconds(20), "Too late"))
-                .isInstanceOf(DomainValidationException.class)
-                .hasMessageContaining("illegal transition");
+        assertThatThrownBy(() -> cancelled.paymentSucceeded(PAYMENT, LATER))
+                .isInstanceOf(DomainValidationException.class);
+        assertThatThrownBy(() -> cancelled.confirm(LATER)).isInstanceOf(DomainValidationException.class);
+        assertThatThrownBy(() -> cancelled.cancel("again", LATER)).isInstanceOf(DomainValidationException.class);
+    }
+
+    @Test
+    void aTotalThatDoesNotMatchTheItemsIsRejected() {
+        Order order = placed();
+
+        assertThatThrownBy(() -> new Order(
+                        order.id(),
+                        order.userId(),
+                        order.reservationId(),
+                        order.status(),
+                        order.sagaStep(),
+                        order.paymentId(),
+                        Money.of("1.00", "USD"),
+                        order.items(),
+                        order.history(),
+                        order.createdAt(),
+                        order.updatedAt()))
+                .isInstanceOf(DomainValidationException.class);
+    }
+
+    @Test
+    void itemsInDifferentCurrenciesCannotBeTotalled() {
+        assertThatThrownBy(() -> Order.place(
+                        OrderId.of(UUID.randomUUID()),
+                        UserId.of(UUID.randomUUID()),
+                        ReservationId.of(UUID.randomUUID()),
+                        List.of(
+                                new OrderItem(ProductId.of(UUID.randomUUID()), 1, Money.of("1.00", "USD")),
+                                new OrderItem(ProductId.of(UUID.randomUUID()), 1, Money.of("1.00", "EUR"))),
+                        NOW))
+                .isInstanceOf(DomainValidationException.class);
     }
 }

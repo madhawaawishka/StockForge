@@ -1,4 +1,5 @@
-# Local development configuration against docker-compose stack
+# Local development against `docker compose up`. These credentials exist only in the local Docker Compose database and
+# are not secrets; real environments supply ORDER_DB_* variables.
 spring:
   datasource:
     url: jdbc:postgresql://localhost:5432/stockforge

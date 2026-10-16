@@ -19,7 +19,6 @@ class HexagonalArchitectureTest {
             .domainModels("..domain.model..")
             .domainServices("..domain.port..")
             .applicationServices("..application..")
-            .adapter("web", "..adapter.in.web..")
             .adapter("grpc", "..adapter.in.grpc..")
             .adapter("kafka", "..adapter.in.kafka..")
             .adapter("scheduler", "..adapter.in.scheduler..")
@@ -27,6 +26,8 @@ class HexagonalArchitectureTest {
             .adapter("messaging", "..adapter.out.messaging..")
             .adapter("id", "..adapter.out.id..")
             .adapter("grpcClient", "..adapter.out.grpc..")
+            .adapter("kafkaClient", "..adapter.out.kafka..")
+            .adapter("metrics", "..adapter.out.metrics..")
             .ignoreDependency(resideInAPackage("..config.."), alwaysTrue());
 
     @ArchTest
@@ -35,7 +36,7 @@ class HexagonalArchitectureTest {
             .resideInAPackage("..domain..")
             .should()
             .onlyDependOnClassesThat()
-            .resideInAnyPackage("java..", "..domain..", "com.stockforge.events..")
+            .resideInAnyPackage("java..", "..domain..")
             .because("the domain must be testable and understandable without any framework");
 
     @ArchTest
@@ -65,7 +66,15 @@ class HexagonalArchitectureTest {
     @ArchTest
     static final ArchRule adaptersAreNotPublicApi = classes()
             .that()
-            .resideInAnyPackage("..adapter.in.web..", "..adapter.in.grpc..", "..adapter.out.persistence..")
+            .resideInAnyPackage(
+                    "..adapter.in.grpc..",
+                    "..adapter.in.kafka..",
+                    "..adapter.in.scheduler..",
+                    "..adapter.out.persistence..",
+                    "..adapter.out.messaging..",
+                    "..adapter.out.grpc..",
+                    "..adapter.out.kafka..",
+                    "..adapter.out.metrics..")
             .should()
             .notBePublic()
             .because("adapters are implementation details reached only through ports, HTTP, or gRPC");

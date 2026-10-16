@@ -1,243 +1,193 @@
 package com.stockforge.order.adapter.in.grpc;
 
-import com.stockforge.order.application.CancelOrderUseCase;
-import com.stockforge.order.application.CreateOrderCommand;
-import com.stockforge.order.application.CreateOrderResult;
-import com.stockforge.order.application.CreateOrderUseCase;
-import com.stockforge.order.application.GetOrderUseCase;
-import com.stockforge.order.domain.model.Money;
+import static com.stockforge.grpc.GrpcProblems.problem;
+
+import com.stockforge.grpc.GrpcProblems;
+import com.stockforge.order.application.OrderQueries;
+import com.stockforge.order.application.PlaceOrderCommand;
+import com.stockforge.order.application.PlaceOrderResult;
+import com.stockforge.order.application.PlaceOrderUseCase;
+import com.stockforge.order.application.ReplayDeadLettersUseCase;
 import com.stockforge.order.domain.model.Order;
 import com.stockforge.order.domain.model.OrderId;
-import com.stockforge.order.domain.model.OrderItem;
-import com.stockforge.order.domain.model.OrderStatusHistoryEntry;
-import com.stockforge.order.domain.model.ProductId;
 import com.stockforge.order.domain.model.ReservationId;
 import com.stockforge.order.domain.model.UserId;
-import com.stockforge.order.v1.CancelOrderRequest;
-import com.stockforge.order.v1.CancelOrderResponse;
+import com.stockforge.order.domain.port.OrderRepository.PageKey;
 import com.stockforge.order.v1.CreateOrderRequest;
 import com.stockforge.order.v1.CreateOrderResponse;
 import com.stockforge.order.v1.GetOrderRequest;
 import com.stockforge.order.v1.GetOrderResponse;
 import com.stockforge.order.v1.ListOrdersRequest;
 import com.stockforge.order.v1.ListOrdersResponse;
-import com.stockforge.order.v1.OrderItemDto;
+import com.stockforge.order.v1.OrderItem;
 import com.stockforge.order.v1.OrderServiceGrpc;
-import com.stockforge.order.v1.OrderStatusHistoryDto;
+import com.stockforge.order.v1.ReplayDeadLettersRequest;
+import com.stockforge.order.v1.ReplayDeadLettersResponse;
+import com.stockforge.order.v1.StatusChange;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
-import java.util.List;
-import java.util.Objects;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
+import java.util.Base64;
+import java.util.Optional;
 import java.util.UUID;
-import org.springframework.stereotype.Component;
+import org.springframework.grpc.server.service.GrpcService;
 
-/** Inbound gRPC adapter exposing internal Order Service contracts (spec §12, §16, §23). */
-@Component
+/** Inbound gRPC adapter of the order service, used by the API gateway (spec §12). Translation only. */
+@GrpcService
 class OrderGrpcService extends OrderServiceGrpc.OrderServiceImplBase {
 
-    private final CreateOrderUseCase createOrderUseCase;
-    private final GetOrderUseCase getOrderUseCase;
-    private final CancelOrderUseCase cancelOrderUseCase;
+    private static final int DEFAULT_PAGE_SIZE = 20;
 
-    OrderGrpcService(
-            CreateOrderUseCase createOrderUseCase,
-            GetOrderUseCase getOrderUseCase,
-            CancelOrderUseCase cancelOrderUseCase) {
-        this.createOrderUseCase = Objects.requireNonNull(createOrderUseCase, "createOrderUseCase must not be null");
-        this.getOrderUseCase = Objects.requireNonNull(getOrderUseCase, "getOrderUseCase must not be null");
-        this.cancelOrderUseCase = Objects.requireNonNull(cancelOrderUseCase, "cancelOrderUseCase must not be null");
+    private final PlaceOrderUseCase placeOrder;
+    private final OrderQueries queries;
+    private final ReplayDeadLettersUseCase replayDeadLetters;
+
+    OrderGrpcService(PlaceOrderUseCase placeOrder, OrderQueries queries, ReplayDeadLettersUseCase replayDeadLetters) {
+        this.placeOrder = placeOrder;
+        this.queries = queries;
+        this.replayDeadLetters = replayDeadLetters;
     }
 
     @Override
-    public void createOrder(CreateOrderRequest request, StreamObserver<CreateOrderResponse> responseObserver) {
-        try {
-            UserId userId = UserId.of(UUID.fromString(request.getUserId()));
-            ReservationId reservationId = ReservationId.of(UUID.fromString(request.getReservationId()));
-            String idempotencyKey = request.getIdempotencyKey();
-
-            // Default order item derived from reservation (flash-sale single-item model, spec §13)
-            OrderItem defaultItem = new OrderItem(
-                    ProductId.of(UUID.fromString("0192f5c4-7a1e-7c3b-9a55-2f1e4c8d9b10")), 1, Money.of("99.99", "USD"));
-
-            CreateOrderCommand command =
-                    new CreateOrderCommand(idempotencyKey, userId, reservationId, List.of(defaultItem));
-            CreateOrderResult result = createOrderUseCase.execute(command);
-
-            switch (result) {
-                case CreateOrderResult.Created c -> sendCreateResponse(c.order(), responseObserver);
-                case CreateOrderResult.IdempotentReplay r -> sendCreateResponse(r.order(), responseObserver);
-                case CreateOrderResult.ReservationAlreadyOrdered r ->
-                    responseObserver.onError(Status.ALREADY_EXISTS
-                            .withDescription("Order already placed for reservation " + r.reservationId())
-                            .asRuntimeException());
-                case CreateOrderResult.IdempotencyConflict c ->
-                    responseObserver.onError(
-                            Status.ABORTED.withDescription(c.message()).asRuntimeException());
-            }
-        } catch (IllegalArgumentException e) {
-            responseObserver.onError(Status.INVALID_ARGUMENT
-                    .withDescription("Invalid request: " + e.getMessage())
-                    .asRuntimeException());
-        } catch (Exception e) {
-            responseObserver.onError(Status.INTERNAL
-                    .withDescription("Internal error: " + e.getMessage())
-                    .asRuntimeException());
+    public void createOrder(CreateOrderRequest request, StreamObserver<CreateOrderResponse> response) {
+        PlaceOrderCommand command = new PlaceOrderCommand(
+                request.getIdempotencyKey(),
+                UserId.of(uuid(request.getUserId(), "user_id")),
+                ReservationId.of(uuid(request.getReservationId(), "reservation_id")),
+                request.getPaymentSimulation().isEmpty()
+                        ? Optional.empty()
+                        : Optional.of(request.getPaymentSimulation()));
+        switch (placeOrder.execute(command)) {
+            case PlaceOrderResult.Placed placed ->
+                complete(
+                        response,
+                        CreateOrderResponse.newBuilder()
+                                .setOrder(toProto(placed.order()))
+                                .setIdempotentReplay(placed.replayed())
+                                .build());
+            case PlaceOrderResult.ReservationNotOrderable notOrderable ->
+                throw problem(
+                        Status.FAILED_PRECONDITION, GrpcProblems.RESERVATION_NOT_ORDERABLE, notOrderable.reason());
+            case PlaceOrderResult.ReservationAlreadyOrdered ordered ->
+                throw problem(
+                        Status.ALREADY_EXISTS,
+                        GrpcProblems.RESERVATION_ALREADY_ORDERED,
+                        "Reservation " + ordered.reservationId() + " already has an order");
+            case PlaceOrderResult.IdempotencyKeyReused reused ->
+                throw problem(
+                        Status.INVALID_ARGUMENT,
+                        GrpcProblems.IDEMPOTENCY_KEY_REUSED,
+                        "This Idempotency-Key was already used for a different request");
         }
     }
 
     @Override
-    public void getOrder(GetOrderRequest request, StreamObserver<GetOrderResponse> responseObserver) {
-        try {
-            OrderId orderId = OrderId.of(UUID.fromString(request.getOrderId()));
-            var found = getOrderUseCase.execute(orderId);
-
-            if (found.isEmpty()) {
-                responseObserver.onError(Status.NOT_FOUND
-                        .withDescription("Order " + orderId.value() + " not found")
-                        .asRuntimeException());
-                return;
-            }
-
-            Order order = found.get();
-            if (!request.getUserId().isBlank()) {
-                UserId requestedUser = UserId.of(UUID.fromString(request.getUserId()));
-                if (!order.userId().equals(requestedUser)) {
-                    // Object-level authorization (spec §28): return NOT_FOUND for other users' resources
-                    responseObserver.onError(Status.NOT_FOUND
-                            .withDescription("Order " + orderId.value() + " not found")
-                            .asRuntimeException());
-                    return;
-                }
-            }
-
-            GetOrderResponse.Builder builder = GetOrderResponse.newBuilder()
-                    .setOrderId(order.id().value().toString())
-                    .setReservationId(order.reservationId().value().toString())
-                    .setUserId(order.userId().value().toString())
-                    .setStatus(order.status().name())
-                    .setTotalAmount(order.totalAmount().amount().toPlainString())
-                    .setCurrency(order.totalAmount().currency().getCurrencyCode())
-                    .setCreatedAt(order.createdAt().toString())
-                    .setUpdatedAt(order.updatedAt().toString());
-
-            for (OrderItem item : order.items()) {
-                builder.addItems(OrderItemDto.newBuilder()
-                        .setProductId(item.productId().value().toString())
-                        .setQuantity(item.quantity())
-                        .setUnitPrice(item.unitPrice().amount().toPlainString())
-                        .setCurrency(item.unitPrice().currency().getCurrencyCode())
-                        .build());
-            }
-
-            for (OrderStatusHistoryEntry entry : order.history()) {
-                builder.addHistory(OrderStatusHistoryDto.newBuilder()
-                        .setFromStatus(
-                                entry.fromStatus() != null ? entry.fromStatus().name() : "")
-                        .setToStatus(entry.toStatus().name())
-                        .setReason(entry.reason())
-                        .setOccurredAt(entry.occurredAt().toString())
-                        .build());
-            }
-
-            responseObserver.onNext(builder.build());
-            responseObserver.onCompleted();
-        } catch (IllegalArgumentException e) {
-            responseObserver.onError(Status.INVALID_ARGUMENT
-                    .withDescription("Invalid request: " + e.getMessage())
-                    .asRuntimeException());
-        } catch (Exception e) {
-            responseObserver.onError(Status.INTERNAL
-                    .withDescription("Internal error: " + e.getMessage())
-                    .asRuntimeException());
-        }
+    public void getOrder(GetOrderRequest request, StreamObserver<GetOrderResponse> response) {
+        OrderId id = OrderId.of(uuid(request.getOrderId(), "order_id"));
+        Optional<UserId> requester = request.getRequesterUserId().isEmpty()
+                ? Optional.empty()
+                : Optional.of(UserId.of(uuid(request.getRequesterUserId(), "requester_user_id")));
+        Order order = queries.find(id, requester)
+                .orElseThrow(() ->
+                        problem(Status.NOT_FOUND, GrpcProblems.ORDER_NOT_FOUND, "Order " + id + " does not exist"));
+        complete(
+                response, GetOrderResponse.newBuilder().setOrder(toProto(order)).build());
     }
 
     @Override
-    public void cancelOrder(CancelOrderRequest request, StreamObserver<CancelOrderResponse> responseObserver) {
-        try {
-            OrderId orderId = OrderId.of(UUID.fromString(request.getOrderId()));
-            String reason = request.getReason().isBlank() ? "Cancelled by user" : request.getReason();
-
-            boolean cancelled = cancelOrderUseCase.execute(orderId, reason);
-            if (!cancelled) {
-                responseObserver.onError(Status.FAILED_PRECONDITION
-                        .withDescription("Order cannot be cancelled in its current state or not found")
-                        .asRuntimeException());
-                return;
-            }
-
-            CancelOrderResponse response = CancelOrderResponse.newBuilder()
-                    .setOrderId(orderId.value().toString())
-                    .setStatus("CANCELLED")
-                    .build();
-
-            responseObserver.onNext(response);
-            responseObserver.onCompleted();
-        } catch (IllegalArgumentException e) {
-            responseObserver.onError(Status.INVALID_ARGUMENT
-                    .withDescription("Invalid request: " + e.getMessage())
-                    .asRuntimeException());
-        } catch (Exception e) {
-            responseObserver.onError(Status.INTERNAL
-                    .withDescription("Internal error: " + e.getMessage())
-                    .asRuntimeException());
+    public void listOrders(ListOrdersRequest request, StreamObserver<ListOrdersResponse> response) {
+        int limit = request.getLimit() == 0 ? DEFAULT_PAGE_SIZE : request.getLimit();
+        if (limit < 1 || limit > OrderQueries.MAX_PAGE_SIZE) {
+            throw problem(
+                    Status.INVALID_ARGUMENT,
+                    GrpcProblems.VALIDATION_FAILED,
+                    "limit must be between 1 and " + OrderQueries.MAX_PAGE_SIZE);
         }
+        Optional<PageKey> after =
+                request.getCursor().isEmpty() ? Optional.empty() : Optional.of(decodeCursor(request.getCursor()));
+        OrderQueries.OrderPage page = queries.list(UserId.of(uuid(request.getUserId(), "user_id")), after, limit);
+        ListOrdersResponse.Builder builder = ListOrdersResponse.newBuilder();
+        page.orders().forEach(order -> builder.addOrders(toProto(order)));
+        page.next().ifPresent(next -> builder.setNextCursor(encodeCursor(next)));
+        complete(response, builder.build());
     }
 
     @Override
-    public void listOrders(ListOrdersRequest request, StreamObserver<ListOrdersResponse> responseObserver) {
-        try {
-            UserId userId = UserId.of(UUID.fromString(request.getUserId()));
-            int limit = request.getLimit() <= 0 ? 20 : Math.min(request.getLimit(), 100);
-            List<Order> list = getOrderUseCase.executeForUser(userId, limit);
-
-            ListOrdersResponse.Builder builder = ListOrdersResponse.newBuilder();
-            for (Order o : list) {
-                GetOrderResponse.Builder orderBuilder = GetOrderResponse.newBuilder()
-                        .setOrderId(o.id().value().toString())
-                        .setReservationId(o.reservationId().value().toString())
-                        .setUserId(o.userId().value().toString())
-                        .setStatus(o.status().name())
-                        .setTotalAmount(o.totalAmount().amount().toPlainString())
-                        .setCurrency(o.totalAmount().currency().getCurrencyCode())
-                        .setCreatedAt(o.createdAt().toString())
-                        .setUpdatedAt(o.updatedAt().toString());
-
-                for (OrderItem item : o.items()) {
-                    orderBuilder.addItems(OrderItemDto.newBuilder()
-                            .setProductId(item.productId().value().toString())
-                            .setQuantity(item.quantity())
-                            .setUnitPrice(item.unitPrice().amount().toPlainString())
-                            .setCurrency(item.unitPrice().currency().getCurrencyCode())
-                            .build());
-                }
-                builder.addOrders(orderBuilder.build());
-            }
-
-            responseObserver.onNext(builder.build());
-            responseObserver.onCompleted();
-        } catch (IllegalArgumentException e) {
-            responseObserver.onError(Status.INVALID_ARGUMENT
-                    .withDescription("Invalid request: " + e.getMessage())
-                    .asRuntimeException());
-        } catch (Exception e) {
-            responseObserver.onError(Status.INTERNAL
-                    .withDescription("Internal error: " + e.getMessage())
-                    .asRuntimeException());
-        }
+    public void replayDeadLetters(
+            ReplayDeadLettersRequest request, StreamObserver<ReplayDeadLettersResponse> response) {
+        int replayed = replayDeadLetters.execute(
+                request.getTopic(), request.getMaxMessages(), required(request.getActorId(), "actor_id"));
+        complete(
+                response,
+                ReplayDeadLettersResponse.newBuilder().setReplayed(replayed).build());
     }
 
-    private void sendCreateResponse(Order order, StreamObserver<CreateOrderResponse> responseObserver) {
-        CreateOrderResponse response = CreateOrderResponse.newBuilder()
-                .setOrderId(order.id().value().toString())
-                .setReservationId(order.reservationId().value().toString())
-                .setUserId(order.userId().value().toString())
+    static com.stockforge.order.v1.Order toProto(Order order) {
+        com.stockforge.order.v1.Order.Builder builder = com.stockforge.order.v1.Order.newBuilder()
+                .setId(order.id().toString())
+                .setUserId(order.userId().toString())
+                .setReservationId(order.reservationId().toString())
                 .setStatus(order.status().name())
                 .setTotalAmount(order.totalAmount().amount().toPlainString())
                 .setCurrency(order.totalAmount().currency().getCurrencyCode())
                 .setCreatedAt(order.createdAt().toString())
-                .build();
-        responseObserver.onNext(response);
-        responseObserver.onCompleted();
+                .setUpdatedAt(order.updatedAt().toString());
+        order.items()
+                .forEach(item -> builder.addItems(OrderItem.newBuilder()
+                        .setProductId(item.productId().toString())
+                        .setQuantity(item.quantity())
+                        .setUnitPrice(item.unitPrice().amount().toPlainString())
+                        .setCurrency(item.unitPrice().currency().getCurrencyCode())
+                        .build()));
+        order.history()
+                .forEach(entry -> builder.addHistory(StatusChange.newBuilder()
+                        .setFromStatus(
+                                entry.fromStatus() == null
+                                        ? ""
+                                        : entry.fromStatus().name())
+                        .setToStatus(entry.toStatus().name())
+                        .setReason(entry.reason())
+                        .setOccurredAt(entry.occurredAt().toString())
+                        .build()));
+        return builder.build();
+    }
+
+    private static String encodeCursor(PageKey key) {
+        return Base64.getUrlEncoder()
+                .withoutPadding()
+                .encodeToString((key.createdAt() + "|" + key.orderId()).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static PageKey decodeCursor(String cursor) {
+        try {
+            String decoded = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
+            int separator = decoded.indexOf('|');
+            return new PageKey(
+                    Instant.parse(decoded.substring(0, separator)), UUID.fromString(decoded.substring(separator + 1)));
+        } catch (IllegalArgumentException | DateTimeParseException | StringIndexOutOfBoundsException malformed) {
+            throw problem(Status.INVALID_ARGUMENT, GrpcProblems.VALIDATION_FAILED, "cursor is not valid");
+        }
+    }
+
+    private static UUID uuid(String value, String field) {
+        try {
+            return UUID.fromString(required(value, field));
+        } catch (IllegalArgumentException malformed) {
+            throw problem(Status.INVALID_ARGUMENT, GrpcProblems.VALIDATION_FAILED, field + " must be a UUID");
+        }
+    }
+
+    private static String required(String value, String field) {
+        if (value == null || value.isBlank()) {
+            throw problem(Status.INVALID_ARGUMENT, GrpcProblems.VALIDATION_FAILED, field + " is required");
+        }
+        return value;
+    }
+
+    private static <T> void complete(StreamObserver<T> observer, T message) {
+        observer.onNext(message);
+        observer.onCompleted();
     }
 }
