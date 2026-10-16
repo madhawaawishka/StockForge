@@ -40,7 +40,11 @@ class HexagonalArchitectureTest {
             .should()
             .onlyDependOnClassesThat()
             .resideInAnyPackage(
-                    "java..", "..domain..", "..application..", "org.springframework.transaction.annotation..")
+                    "java..",
+                    "..domain..",
+                    "..application..",
+                    "com.stockforge.events..",
+                    "org.springframework.transaction.annotation..")
             .because("use cases own transaction boundaries but must not depend on web or persistence");
 
     @ArchTest
