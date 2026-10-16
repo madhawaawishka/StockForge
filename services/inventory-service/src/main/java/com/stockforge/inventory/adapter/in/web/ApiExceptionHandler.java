@@ -1,5 +1,6 @@
 package com.stockforge.inventory.adapter.in.web;
 
+import com.stockforge.inventory.adapter.in.DependencyFailures;
 import com.stockforge.inventory.adapter.in.web.ApiProblems.Violation;
 import com.stockforge.inventory.domain.model.DomainValidationException;
 import java.net.URI;
@@ -30,6 +31,9 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(ApiExceptionHandler.class);
+
+    /** Long enough for a connection pool or a failed-over database to recover, short enough to keep clients engaged. */
+    private static final String RETRY_AFTER_SECONDS = "2";
 
     @Override
     protected ResponseEntity<Object> handleMethodArgumentNotValid(
@@ -79,9 +83,20 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         return handleExceptionInternal(ex, body, new HttpHeaders(), HttpStatus.BAD_REQUEST, request);
     }
 
-    /** Last resort: log the details, return nothing internal to the client. */
+    /**
+     * Last resort. A database that is unreachable, timed out, or still contended after retries is answered with 503 +
+     * Retry-After (spec §23 D), so clients know the request is safe to retry with the same Idempotency-Key; anything
+     * else is logged and answered with a 500 that reveals nothing internal.
+     */
     @ExceptionHandler(Exception.class)
     ResponseEntity<Object> handleUnexpected(Exception ex, WebRequest request) {
+        if (DependencyFailures.isUnavailable(ex)) {
+            log.warn("Dependency unavailable while processing {}: {}", request.getDescription(false), ex.toString());
+            HttpHeaders headers = new HttpHeaders();
+            headers.set(HttpHeaders.RETRY_AFTER, RETRY_AFTER_SECONDS);
+            return handleExceptionInternal(
+                    ex, ApiProblems.serviceUnavailable(), headers, HttpStatus.SERVICE_UNAVAILABLE, request);
+        }
         log.error("Unhandled exception while processing {}", request.getDescription(false), ex);
         return handleExceptionInternal(
                 ex, ApiProblems.internalError(), new HttpHeaders(), HttpStatus.INTERNAL_SERVER_ERROR, request);

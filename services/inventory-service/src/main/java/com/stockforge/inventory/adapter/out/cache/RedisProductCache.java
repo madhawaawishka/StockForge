@@ -1,7 +1,6 @@
 package com.stockforge.inventory.adapter.out.cache;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.stockforge.inventory.config.InventoryProperties;
 import com.stockforge.inventory.domain.model.Inventory;
 import com.stockforge.inventory.domain.model.Money;
 import com.stockforge.inventory.domain.model.Product;
@@ -12,185 +11,189 @@ import com.stockforge.inventory.domain.port.ProductCache;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
-import java.io.IOException;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import tools.jackson.databind.json.JsonMapper;
 
-/** Redis-backed cache-aside implementation with stampede protection and jittered TTL (spec §17). */
+/**
+ * Cache-aside product cache in Redis (spec §17).
+ *
+ * <ul>
+ *   <li><b>Redis is optional (NFR-9).</b> Every call has a short command timeout ({@code spring.data.redis.timeout})
+ *       and goes through the {@code productCache} circuit breaker. A failure or an open breaker is a cache miss, so
+ *       reads fall back to PostgreSQL and never fail because of Redis.
+ *   <li><b>Jittered TTLs</b> keep products cached together from expiring together.
+ *   <li><b>Invalidation after commit</b> by deleting, never overwriting, the key.
+ *   <li><b>Metrics:</b> {@code stockforge_cache_requests_total{cache,result}} gives the hit ratio.
+ * </ul>
+ */
 @Component
 class RedisProductCache implements ProductCache {
 
     private static final Logger log = LoggerFactory.getLogger(RedisProductCache.class);
 
-    private static final String PRODUCT_KEY_PREFIX = "stockforge:product:";
-    private static final String INVENTORY_KEY_PREFIX = "stockforge:inventory:";
-    private static final int PRODUCT_BASE_TTL_SECONDS = 300;
-    private static final int PRODUCT_JITTER_SECONDS = 60;
-    private static final int INVENTORY_BASE_TTL_SECONDS = 2;
+    private static final String PRODUCT_KEY = "stockforge:product:";
+    private static final String INVENTORY_KEY = "stockforge:availability:";
 
     private final StringRedisTemplate redis;
-    private final ObjectMapper objectMapper;
-    private final CircuitBreaker circuitBreaker;
+    private final JsonMapper json;
+    private final CircuitBreaker breaker;
+    private final InventoryProperties.Cache config;
+    private final MeterRegistry meters;
 
     RedisProductCache(
             StringRedisTemplate redis,
-            ObjectMapper objectMapper,
-            ObjectProvider<CircuitBreakerRegistry> circuitBreakerRegistryProvider) {
+            JsonMapper json,
+            CircuitBreakerRegistry breakers,
+            InventoryProperties properties,
+            MeterRegistry meters) {
         this.redis = redis;
-        this.objectMapper = objectMapper;
-        CircuitBreakerRegistry registry =
-                circuitBreakerRegistryProvider != null ? circuitBreakerRegistryProvider.getIfAvailable() : null;
-        this.circuitBreaker = registry != null
-                ? registry.circuitBreaker("redisCatalogCache")
-                : CircuitBreaker.ofDefaults("redisCatalogCache");
-    }
-
-    RedisProductCache(StringRedisTemplate redis, ObjectMapper objectMapper) {
-        this(redis, objectMapper, null);
+        this.json = json;
+        this.breaker = breakers.circuitBreaker("productCache");
+        this.config = properties.cache();
+        this.meters = meters;
     }
 
     @Override
     public Optional<Product> getProduct(ProductId id) {
-        String key = PRODUCT_KEY_PREFIX + id.value();
-        try {
-            String json =
-                    circuitBreaker.executeSupplier(() -> redis.opsForValue().get(key));
-            if (json == null) {
-                return Optional.empty();
-            }
-            return Optional.of(deserializeProduct(json));
-        } catch (CallNotPermittedException e) {
-            log.warn("Redis circuit breaker is OPEN for key {}. Falling back to DB.", key);
-            return Optional.empty();
-        } catch (Exception e) {
-            log.warn("Redis read failure for key {}: {}. Falling back to DB.", key, e.getMessage());
-            return Optional.empty();
-        }
+        return read("product", PRODUCT_KEY + id.value())
+                .flatMap(value -> decode(() -> toProduct(json.readValue(value, CachedProduct.class))));
     }
 
     @Override
     public void putProduct(Product product) {
-        String key = PRODUCT_KEY_PREFIX + product.id().value();
-        try {
-            String json = serializeProduct(product);
-            int jitter = ThreadLocalRandom.current().nextInt(PRODUCT_JITTER_SECONDS + 1);
-            Duration ttl = Duration.ofSeconds((long) PRODUCT_BASE_TTL_SECONDS + jitter);
-            redis.opsForValue().set(key, json, ttl);
-        } catch (Exception e) {
-            log.warn("Redis write failure for key {}: {}", key, e.getMessage());
-        }
+        long jitterMillis =
+                ThreadLocalRandom.current().nextLong(config.productTtlJitter().toMillis() + 1);
+        write(
+                PRODUCT_KEY + product.id().value(),
+                json.writeValueAsString(CachedProduct.from(product)),
+                config.productTtl().plusMillis(jitterMillis));
     }
 
     @Override
     public void evictProduct(ProductId id) {
-        String key = PRODUCT_KEY_PREFIX + id.value();
-        try {
-            redis.delete(key);
-            log.debug("Evicted cache for product {}", id.value());
-        } catch (Exception e) {
-            log.warn("Redis evict failure for key {}: {}", key, e.getMessage());
-        }
+        evictAfterCommit(PRODUCT_KEY + id.value());
     }
 
     @Override
     public Optional<Inventory> getInventory(ProductId id) {
-        String key = INVENTORY_KEY_PREFIX + id.value();
-        try {
-            String json =
-                    circuitBreaker.executeSupplier(() -> redis.opsForValue().get(key));
-            if (json == null) {
-                return Optional.empty();
-            }
-            return Optional.of(deserializeInventory(json));
-        } catch (CallNotPermittedException e) {
-            log.warn("Redis circuit breaker is OPEN for inventory key {}. Falling back to DB.", key);
-            return Optional.empty();
-        } catch (Exception e) {
-            log.warn("Redis read failure for inventory key {}: {}", key, e.getMessage());
-            return Optional.empty();
-        }
+        return read("availability", INVENTORY_KEY + id.value())
+                .flatMap(value -> decode(() -> toInventory(json.readValue(value, CachedInventory.class))));
     }
 
     @Override
     public void putInventory(Inventory inventory) {
-        String key = INVENTORY_KEY_PREFIX + inventory.productId().value();
-        try {
-            String json = serializeInventory(inventory);
-            Duration ttl = Duration.ofSeconds(INVENTORY_BASE_TTL_SECONDS);
-            redis.opsForValue().set(key, json, ttl);
-        } catch (Exception e) {
-            log.warn("Redis write failure for inventory key {}: {}", key, e.getMessage());
-        }
+        write(
+                INVENTORY_KEY + inventory.productId().value(),
+                json.writeValueAsString(CachedInventory.from(inventory)),
+                config.availabilityTtl());
     }
 
     @Override
     public void evictInventory(ProductId id) {
-        String key = INVENTORY_KEY_PREFIX + id.value();
-        try {
-            redis.delete(key);
-        } catch (Exception e) {
-            log.warn("Redis evict failure for inventory key {}: {}", key, e.getMessage());
+        evictAfterCommit(INVENTORY_KEY + id.value());
+    }
+
+    private Optional<String> read(String cache, String key) {
+        Optional<String> value = guarded(() -> redis.opsForValue().get(key), "read " + key);
+        count(cache, value.isPresent() ? "hit" : "miss");
+        return value;
+    }
+
+    private void write(String key, String value, Duration ttl) {
+        Optional<Boolean> unused = guarded(
+                () -> {
+                    redis.opsForValue().set(key, value, ttl);
+                    return Boolean.TRUE;
+                },
+                "write " + key);
+    }
+
+    /**
+     * Deleting after commit avoids caching a value that is then rolled back; deleting rather than writing the new value
+     * avoids racing a concurrent writer (spec §17).
+     */
+    private void evictAfterCommit(String key) {
+        Runnable delete = () -> guarded(() -> redis.delete(key), "delete " + key);
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    delete.run();
+                }
+            });
+        } else {
+            delete.run();
         }
     }
 
-    private String serializeProduct(Product product) throws JsonProcessingException {
-        ProductCacheDto dto = new ProductCacheDto(
-                product.id().value().toString(),
-                product.sku().value(),
-                product.name(),
-                product.price().amount().toPlainString(),
-                product.price().currency().getCurrencyCode(),
-                product.status().name(),
-                product.createdAt().toString(),
-                product.updatedAt().toString());
-        return objectMapper.writeValueAsString(dto);
+    private <T> Optional<T> guarded(Supplier<T> call, String what) {
+        try {
+            return Optional.ofNullable(breaker.executeSupplier(call));
+        } catch (CallNotPermittedException open) {
+            return Optional.empty();
+        } catch (RuntimeException unavailable) {
+            // Expected while Redis is down; the breaker opens after a few failures and stops the log noise.
+            log.debug("Redis {} failed: {}", what, unavailable.toString());
+            return Optional.empty();
+        }
     }
 
-    private Product deserializeProduct(String json) throws IOException {
-        ProductCacheDto dto = objectMapper.readValue(json, ProductCacheDto.class);
+    /** An entry written by an incompatible older version is treated as a miss and overwritten by the reload. */
+    private static <T> Optional<T> decode(Supplier<T> decoder) {
+        try {
+            return Optional.of(decoder.get());
+        } catch (RuntimeException unreadable) {
+            log.warn("Ignoring unreadable cache entry: {}", unreadable.toString());
+            return Optional.empty();
+        }
+    }
+
+    private void count(String cache, String result) {
+        Counter.builder("stockforge.cache.requests")
+                .description("Cache lookups by result")
+                .tag("cache", cache)
+                .tag("result", result)
+                .register(meters)
+                .increment();
+    }
+
+    private static Product toProduct(CachedProduct cached) {
         return new Product(
-                ProductId.of(UUID.fromString(dto.id())),
-                new Sku(dto.sku()),
-                dto.name(),
-                Money.of(dto.priceAmount(), dto.currency()),
-                ProductStatus.valueOf(dto.status()),
-                Instant.parse(dto.createdAt()),
-                Instant.parse(dto.updatedAt()));
+                ProductId.of(UUID.fromString(cached.id())),
+                Sku.of(cached.sku()),
+                cached.name(),
+                Money.of(cached.priceAmount(), cached.currency()),
+                ProductStatus.valueOf(cached.status()),
+                Instant.parse(cached.createdAt()),
+                Instant.parse(cached.updatedAt()));
     }
 
-    private String serializeInventory(Inventory inventory) throws JsonProcessingException {
-        InventoryCacheDto dto = new InventoryCacheDto(
-                inventory.productId().value().toString(),
-                inventory.totalQuantity(),
-                inventory.availableQuantity(),
-                inventory.reservedQuantity(),
-                inventory.soldQuantity(),
-                inventory.version(),
-                inventory.updatedAt().toString());
-        return objectMapper.writeValueAsString(dto);
-    }
-
-    private Inventory deserializeInventory(String json) throws IOException {
-        InventoryCacheDto dto = objectMapper.readValue(json, InventoryCacheDto.class);
+    private static Inventory toInventory(CachedInventory cached) {
         return new Inventory(
-                ProductId.of(UUID.fromString(dto.productId())),
-                dto.totalQuantity(),
-                dto.availableQuantity(),
-                dto.reservedQuantity(),
-                dto.soldQuantity(),
-                dto.version(),
-                Instant.parse(dto.updatedAt()));
+                ProductId.of(UUID.fromString(cached.productId())),
+                cached.total(),
+                cached.available(),
+                cached.reserved(),
+                cached.sold(),
+                cached.version(),
+                Instant.parse(cached.updatedAt()));
     }
 
-    private record ProductCacheDto(
+    /** Cache representation, decoupled from the domain records so they can evolve independently. */
+    record CachedProduct(
             String id,
             String sku,
             String name,
@@ -198,14 +201,33 @@ class RedisProductCache implements ProductCache {
             String currency,
             String status,
             String createdAt,
-            String updatedAt) {}
+            String updatedAt) {
 
-    private record InventoryCacheDto(
-            String productId,
-            int totalQuantity,
-            int availableQuantity,
-            int reservedQuantity,
-            int soldQuantity,
-            long version,
-            String updatedAt) {}
+        static CachedProduct from(Product product) {
+            return new CachedProduct(
+                    product.id().toString(),
+                    product.sku().value(),
+                    product.name(),
+                    product.price().amount().toPlainString(),
+                    product.price().currency().getCurrencyCode(),
+                    product.status().name(),
+                    product.createdAt().toString(),
+                    product.updatedAt().toString());
+        }
+    }
+
+    record CachedInventory(
+            String productId, int total, int available, int reserved, int sold, long version, String updatedAt) {
+
+        static CachedInventory from(Inventory inventory) {
+            return new CachedInventory(
+                    inventory.productId().toString(),
+                    inventory.totalQuantity(),
+                    inventory.availableQuantity(),
+                    inventory.reservedQuantity(),
+                    inventory.soldQuantity(),
+                    inventory.version(),
+                    inventory.updatedAt().toString());
+        }
+    }
 }

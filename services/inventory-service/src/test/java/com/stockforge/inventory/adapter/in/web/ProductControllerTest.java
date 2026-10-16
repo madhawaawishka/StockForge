@@ -16,6 +16,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.stockforge.inventory.application.Availability;
 import com.stockforge.inventory.application.CreateProductResult;
 import com.stockforge.inventory.application.CreateProductUseCase;
 import com.stockforge.inventory.application.ProductCatalogQueries;
@@ -105,7 +106,7 @@ class ProductControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(content().contentType(PROBLEM_JSON))
                 .andExpect(jsonPath("$.type").value(TYPE_BASE + "validation-failed"))
-                .andExpect(jsonPath("$.errors[*].field")
+                .andExpect(jsonPath("$.violations[*].field")
                         .value(containsInAnyOrder("sku", "name", "price.amount", "price.currency", "initialStock")));
         verifyNoInteractions(createProduct);
     }
@@ -178,7 +179,7 @@ class ProductControllerTest {
         mockMvc.perform(get("/api/v1/products").param("limit", "101"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.type").value(TYPE_BASE + "validation-failed"))
-                .andExpect(jsonPath("$.errors[0].field").value("limit"));
+                .andExpect(jsonPath("$.violations[0].field").value("limit"));
         verifyNoInteractions(catalog);
     }
 
@@ -191,13 +192,15 @@ class ProductControllerTest {
 
     @Test
     void availabilityReportsStockFromTheSourceOfTruth() throws Exception {
-        given(catalog.findInventory(PRODUCT_ID)).willReturn(Optional.of(Inventory.initial(PRODUCT_ID, 7, NOW)));
+        given(catalog.findAvailability(PRODUCT_ID))
+                .willReturn(Optional.of(new Availability(Inventory.initial(PRODUCT_ID, 7, NOW), true)));
 
         mockMvc.perform(get("/api/v1/products/{id}/availability", PRODUCT_ID))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.productId").value(PRODUCT_ID.toString()))
                 .andExpect(jsonPath("$.availableQuantity").value(7))
-                .andExpect(jsonPath("$.inStock").value(true));
+                .andExpect(jsonPath("$.inStock").value(true))
+                .andExpect(jsonPath("$.approximate").value(true));
     }
 
     @Test

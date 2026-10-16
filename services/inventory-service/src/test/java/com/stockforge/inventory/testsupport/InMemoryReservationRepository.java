@@ -1,12 +1,12 @@
 package com.stockforge.inventory.testsupport;
 
-import com.stockforge.inventory.domain.model.ProductId;
 import com.stockforge.inventory.domain.model.Reservation;
 import com.stockforge.inventory.domain.model.ReservationId;
 import com.stockforge.inventory.domain.model.ReservationStatus;
-import com.stockforge.inventory.domain.model.UserId;
 import com.stockforge.inventory.domain.port.ReservationRepository;
+import java.time.Clock;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -16,6 +16,15 @@ import java.util.Optional;
 public class InMemoryReservationRepository implements ReservationRepository {
 
     private final Map<ReservationId, Reservation> reservations = new HashMap<>();
+    private final Clock clock;
+
+    public InMemoryReservationRepository() {
+        this(Clock.systemUTC());
+    }
+
+    public InMemoryReservationRepository(Clock clock) {
+        this.clock = clock;
+    }
 
     @Override
     public synchronized void insert(Reservation reservation) {
@@ -50,27 +59,16 @@ public class InMemoryReservationRepository implements ReservationRepository {
         return true;
     }
 
+    /** Uses the injected clock where the real repository uses database time. */
     @Override
-    public synchronized int findActiveQuantityByUserAndProduct(UserId userId, ProductId productId) {
-        return reservations.values().stream()
-                .filter(r -> r.userId().equals(userId) && r.productId().equals(productId))
-                .filter(r -> r.status() == ReservationStatus.PENDING || r.status() == ReservationStatus.CONFIRMED)
-                .mapToInt(Reservation::quantity)
-                .sum();
-    }
-
-    @Override
-    public synchronized List<Reservation> findExpiredPending(Instant now, int limit) {
+    public synchronized List<Reservation> claimExpiredPendingBatch(int limit) {
+        Instant now = clock.instant();
         return reservations.values().stream()
                 .filter(r ->
                         r.status() == ReservationStatus.PENDING && r.expiresAt().isBefore(now))
+                .sorted(Comparator.comparing(Reservation::expiresAt))
                 .limit(limit)
                 .toList();
-    }
-
-    @Override
-    public synchronized List<Reservation> claimExpiredPendingBatch(Instant now, int limit) {
-        return findExpiredPending(now, limit);
     }
 
     public synchronized int count() {

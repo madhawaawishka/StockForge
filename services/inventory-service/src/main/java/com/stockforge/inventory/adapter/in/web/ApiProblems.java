@@ -67,8 +67,12 @@ final class ApiProblems {
                 "The 'Idempotency-Key' HTTP header is required for this operation");
     }
 
-    static ErrorResponseException idempotencyConflict(String detail) {
-        return exception(HttpStatus.CONFLICT, "idempotency-key-conflict", "Idempotency conflict", detail);
+    static ErrorResponseException idempotencyKeyReused() {
+        return exception(
+                HttpStatus.UNPROCESSABLE_CONTENT,
+                "idempotency-key-reused",
+                "Idempotency-Key reused",
+                "This Idempotency-Key was already used for a different request");
     }
 
     static ErrorResponseException reservationNotFound(com.stockforge.inventory.domain.model.ReservationId id) {
@@ -94,14 +98,14 @@ final class ApiProblems {
                 HttpStatus.CONFLICT,
                 "optimistic-lock-conflict",
                 "Optimistic lock conflict",
-                "Concurrent update conflict on product " + id + "; please retry");
+                "Too much contention on product " + id + "; retry with the same Idempotency-Key");
     }
 
     static ProblemDetail validationFailed(String detail, List<Violation> violations) {
         ProblemDetail problem =
                 problem(HttpStatus.BAD_REQUEST, "validation-failed", "Request validation failed", detail);
         if (!violations.isEmpty()) {
-            problem.setProperty("errors", violations);
+            problem.setProperty("violations", violations);
         }
         return problem;
     }
@@ -120,6 +124,14 @@ final class ApiProblems {
                 "invalid-parameter",
                 "Invalid parameter",
                 "Parameter '" + parameter + "' has an invalid value");
+    }
+
+    static ProblemDetail serviceUnavailable() {
+        return problem(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "service-unavailable",
+                "Service unavailable",
+                "A dependency is temporarily unavailable; retry after the Retry-After interval");
     }
 
     static ProblemDetail internalError() {

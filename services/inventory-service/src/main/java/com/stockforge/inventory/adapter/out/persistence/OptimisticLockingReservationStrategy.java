@@ -9,25 +9,27 @@ import com.stockforge.inventory.domain.port.StockReservationStrategy;
 import com.stockforge.inventory.domain.port.StrategyType;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
-import org.springframework.stereotype.Component;
 
 /**
  * Optimistic locking reservation strategy with application retries (spec §14 B).
  *
  * <p>Reads the current version, then attempts to update with {@code WHERE version = :version}. On version mismatch,
- * retries with jittered exponential backoff up to {@code MAX_RETRIES}.
+ * retries with jittered exponential backoff up to the configured number of attempts.
  */
-@Component
 class OptimisticLockingReservationStrategy implements StockReservationStrategy {
-
-    static final int MAX_RETRIES = 5;
 
     private final InventoryRepository inventories;
     private final ReservationRepository reservations;
+    private final int maxAttempts;
 
-    OptimisticLockingReservationStrategy(InventoryRepository inventories, ReservationRepository reservations) {
+    OptimisticLockingReservationStrategy(
+            InventoryRepository inventories, ReservationRepository reservations, int maxAttempts) {
+        if (maxAttempts < 1) {
+            throw new IllegalArgumentException("maxAttempts must be positive");
+        }
         this.inventories = inventories;
         this.reservations = reservations;
+        this.maxAttempts = maxAttempts;
     }
 
     @Override
@@ -37,7 +39,7 @@ class OptimisticLockingReservationStrategy implements StockReservationStrategy {
 
     @Override
     public StockReservationResult reserve(Reservation reservation) {
-        for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             Optional<Inventory> current = inventories.findByProductId(reservation.productId());
             if (current.isEmpty() || current.get().availableQuantity() < reservation.quantity()) {
                 return new StockReservationResult.InsufficientStock();
@@ -55,7 +57,7 @@ class OptimisticLockingReservationStrategy implements StockReservationStrategy {
             }
 
             // Conflict detected: backoff with random jitter before retrying
-            if (attempt < MAX_RETRIES) {
+            if (attempt < maxAttempts) {
                 try {
                     int backoffMs = (attempt * 5) + ThreadLocalRandom.current().nextInt(5);
                     Thread.sleep(backoffMs);

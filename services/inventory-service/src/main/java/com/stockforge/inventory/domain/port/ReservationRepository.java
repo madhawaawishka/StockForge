@@ -1,15 +1,13 @@
 package com.stockforge.inventory.domain.port;
 
-import com.stockforge.inventory.domain.model.ProductId;
 import com.stockforge.inventory.domain.model.Reservation;
 import com.stockforge.inventory.domain.model.ReservationId;
 import com.stockforge.inventory.domain.model.ReservationStatus;
-import com.stockforge.inventory.domain.model.UserId;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
-/** Persistence port for reservations. */
+/** Reservations (spec §13, §16 A, §21). */
 public interface ReservationRepository {
 
     void insert(Reservation reservation);
@@ -17,18 +15,15 @@ public interface ReservationRepository {
     Optional<Reservation> findById(ReservationId id);
 
     /**
-     * Atomically transitions reservation status if currently in {@code currentStatus}. Returns true if updated, false
-     * if not found or already in another state.
+     * Conditional state transition: {@code UPDATE ... WHERE id = :id AND status = :current} (spec §16 A). Exactly one
+     * of several racing transitions (confirm, cancel, expire) affects the row; the others get {@code false}.
      */
     boolean updateStatusIfCurrent(
             ReservationId id, ReservationStatus currentStatus, ReservationStatus newStatus, Instant now);
 
-    /** Returns active (PENDING or CONFIRMED) quantity for the user and product. */
-    int findActiveQuantityByUserAndProduct(UserId userId, ProductId productId);
-
-    /** Finds PENDING reservations that have passed their expires_at timestamp. */
-    List<Reservation> findExpiredPending(Instant now, int limit);
-
-    /** Atomically claims expired PENDING reservations using FOR UPDATE SKIP LOCKED (spec §21). */
-    List<Reservation> claimExpiredPendingBatch(Instant now, int limit);
+    /**
+     * Locks up to {@code limit} PENDING reservations whose expiry passed according to <b>database time</b>, skipping
+     * rows another worker already holds ({@code FOR UPDATE SKIP LOCKED}, spec §21). Must run in a transaction.
+     */
+    List<Reservation> claimExpiredPendingBatch(int limit);
 }

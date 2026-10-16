@@ -7,6 +7,8 @@ import com.stockforge.inventory.domain.model.Money;
 import com.stockforge.inventory.domain.model.Product;
 import com.stockforge.inventory.domain.model.ProductId;
 import com.stockforge.inventory.domain.model.Sku;
+import com.stockforge.inventory.domain.port.ProductCache;
+import com.stockforge.inventory.testsupport.InMemoryAuditLog;
 import com.stockforge.inventory.testsupport.InMemoryInventoryRepository;
 import com.stockforge.inventory.testsupport.InMemoryProductRepository;
 import com.stockforge.inventory.testsupport.SequentialIdGenerator;
@@ -25,17 +27,19 @@ class ProductCatalogQueriesTest {
 
     private final InMemoryProductRepository products = new InMemoryProductRepository();
     private final InMemoryInventoryRepository inventories = new InMemoryInventoryRepository();
-    private final ProductCatalogQueries queries = new ProductCatalogQueries(products, inventories);
+    private final ProductCatalogQueries queries = new ProductCatalogQueries(products, inventories, ProductCache.NONE);
 
     @BeforeEach
     void createFiveProducts() {
         CreateProductUseCase create = new CreateProductUseCase(
                 products,
                 inventories,
+                new InMemoryAuditLog(),
                 new SequentialIdGenerator(),
                 Clock.fixed(Instant.parse("2026-10-08T10:00:00Z"), ZoneOffset.UTC));
         for (int i = 1; i <= 5; i++) {
-            create.execute(new CreateProductCommand(Sku.of("SKU-" + i), "Product " + i, Money.of("1.00", "USD"), i));
+            create.execute(
+                    new CreateProductCommand(Sku.of("SKU-" + i), "Product " + i, Money.of("1.00", "USD"), i, "admin"));
         }
     }
 
@@ -76,11 +80,12 @@ class ProductCatalogQueriesTest {
     }
 
     @Test
-    void findsInventoryForExistingProductsOnly() {
-        assertThat(queries.findInventory(id(3)))
-                .hasValueSatisfying(
-                        inventory -> assertThat(inventory.availableQuantity()).isEqualTo(3));
-        assertThat(queries.findInventory(id(99))).isEmpty();
+    void findsAvailabilityForExistingProductsOnly() {
+        assertThat(queries.findAvailability(id(3))).hasValueSatisfying(availability -> {
+            assertThat(availability.inventory().availableQuantity()).isEqualTo(3);
+            assertThat(availability.approximate()).isFalse();
+        });
+        assertThat(queries.findAvailability(id(99))).isEmpty();
     }
 
     private static ProductId id(long sequence) {

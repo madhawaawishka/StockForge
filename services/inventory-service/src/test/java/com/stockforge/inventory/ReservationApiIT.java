@@ -3,11 +3,13 @@ package com.stockforge.inventory;
 import static com.stockforge.inventory.testsupport.TestData.createProductJson;
 import static com.stockforge.inventory.testsupport.TestData.uniqueSku;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import com.jayway.jsonpath.JsonPath;
 import com.stockforge.inventory.testsupport.InventoryIntegrationTest;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -74,7 +76,7 @@ class ReservationApiIT {
                 .jsonPath("$.availableQuantity")
                 .isEqualTo(8);
 
-        // 4. Idempotent replay: sending same key and body returns 200 OK with Idempotent-Replayed: true
+        // 4. Idempotent replay: same key and body returns the original 201 and body, flagged as a replay (spec §19)
         client.post()
                 .uri("/api/v1/reservations")
                 .header("Idempotency-Key", idempotencyKey)
@@ -82,7 +84,7 @@ class ReservationApiIT {
                 .body(reserveJson)
                 .exchange()
                 .expectStatus()
-                .isOk()
+                .isCreated()
                 .expectHeader()
                 .valueEquals("Idempotent-Replayed", "true")
                 .expectBody()
@@ -123,15 +125,17 @@ class ReservationApiIT {
                 .jsonPath("$.status")
                 .isEqualTo("CANCELLED");
 
-        // Availability check: available should be restored to 10
-        client.get()
-                .uri("/api/v1/products/{id}/availability", productId)
-                .exchange()
-                .expectStatus()
-                .isOk()
-                .expectBody()
-                .jsonPath("$.availableQuantity")
-                .isEqualTo(10);
+        // Availability is cached for a couple of seconds and labelled approximate (spec §17), so the released units
+        // show up there eventually; the reservation path itself always reads the database.
+        await().atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> client.get()
+                        .uri("/api/v1/products/{id}/availability", productId)
+                        .exchange()
+                        .expectStatus()
+                        .isOk()
+                        .expectBody()
+                        .jsonPath("$.availableQuantity")
+                        .isEqualTo(10));
 
         // 7. Cancelling an already cancelled reservation returns 409 Conflict
         client.post()
@@ -168,7 +172,7 @@ class ReservationApiIT {
     }
 
     @Test
-    void reusingIdempotencyKeyWithDifferentPayloadReturns409() {
+    void reusingIdempotencyKeyWithDifferentPayloadReturns422() {
         String productId = createProduct(uniqueSku(), 10);
         UUID userId = UUID.randomUUID();
         String idempotencyKey = "key-" + UUID.randomUUID();
@@ -195,12 +199,12 @@ class ReservationApiIT {
                         """.formatted(productId, userId))
                 .exchange()
                 .expectStatus()
-                .isEqualTo(409)
+                .isEqualTo(422)
                 .expectHeader()
                 .contentType(MediaType.APPLICATION_PROBLEM_JSON)
                 .expectBody()
                 .jsonPath("$.type")
-                .isEqualTo(PROBLEM_TYPE_BASE + "idempotency-key-conflict");
+                .isEqualTo(PROBLEM_TYPE_BASE + "idempotency-key-reused");
     }
 
     @Test

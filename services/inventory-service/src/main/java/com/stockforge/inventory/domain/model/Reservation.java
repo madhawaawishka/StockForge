@@ -66,12 +66,13 @@ public record Reservation(
         return status == ReservationStatus.PENDING;
     }
 
+    /** Expiry decisions in production use database time (spec §21); this is for clients and tests. */
     public boolean isExpired(Instant now) {
         return now.isAfter(expiresAt);
     }
 
     private void requirePending(String action) {
-        if (!status.canTransitionTo(ReservationStatus.CONFIRMED)) { // any transition from non-PENDING is illegal
+        if (status != ReservationStatus.PENDING) {
             throw new DomainValidationException(
                     "Cannot " + action + " reservation in status " + status + "; only PENDING can be transitioned");
         }

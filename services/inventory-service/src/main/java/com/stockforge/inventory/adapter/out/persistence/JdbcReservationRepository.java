@@ -73,47 +73,17 @@ class JdbcReservationRepository implements ReservationRepository {
     }
 
     @Override
-    public int findActiveQuantityByUserAndProduct(UserId userId, ProductId productId) {
-        Integer total = jdbc.sql("""
-                        SELECT COALESCE(SUM(quantity), 0)
-                        FROM reservations
-                        WHERE user_id = :userId
-                          AND product_id = :productId
-                          AND status IN ('PENDING', 'CONFIRMED')
-                        """)
-                .param("userId", userId.value())
-                .param("productId", productId.value())
-                .query(Integer.class)
-                .single();
-        return total != null ? total : 0;
-    }
-
-    @Override
-    public List<Reservation> findExpiredPending(Instant now, int limit) {
+    public List<Reservation> claimExpiredPendingBatch(int limit) {
+        // Database time (now()), not the worker's clock: skewed instances cannot expire a reservation early (spec §21).
+        // Served by the partial index idx_reservations_pending_expires_at.
         return jdbc.sql("""
                         SELECT id, user_id, product_id, quantity, status, expires_at, created_at, updated_at
                         FROM reservations
-                        WHERE status = 'PENDING' AND expires_at < :now
-                        ORDER BY expires_at
-                        LIMIT :limit
-                        """)
-                .param("now", toTimestamp(now))
-                .param("limit", limit)
-                .query(JdbcReservationRepository::mapRow)
-                .list();
-    }
-
-    @Override
-    public List<Reservation> claimExpiredPendingBatch(Instant now, int limit) {
-        return jdbc.sql("""
-                        SELECT id, user_id, product_id, quantity, status, expires_at, created_at, updated_at
-                        FROM reservations
-                        WHERE status = 'PENDING' AND expires_at < :now
+                        WHERE status = 'PENDING' AND expires_at < now()
                         ORDER BY expires_at
                         LIMIT :limit
                         FOR UPDATE SKIP LOCKED
                         """)
-                .param("now", toTimestamp(now))
                 .param("limit", limit)
                 .query(JdbcReservationRepository::mapRow)
                 .list();

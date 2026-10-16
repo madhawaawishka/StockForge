@@ -107,6 +107,31 @@ public record Inventory(
                 now);
     }
 
+    /**
+     * Administrative stock adjustment (FR-10): a positive delta adds received units, a negative one writes off
+     * available units. Reserved and sold units can never be adjusted away, because they belong to customers.
+     */
+    public Inventory adjust(int delta, Instant now) {
+        if (delta == 0) {
+            throw new DomainValidationException("Stock adjustment must not be zero");
+        }
+        if ((long) availableQuantity + delta < 0) {
+            throw new DomainValidationException(
+                    "Cannot remove " + -delta + " units; only " + availableQuantity + " are available");
+        }
+        if ((long) totalQuantity + delta > Integer.MAX_VALUE) {
+            throw new DomainValidationException("Stock adjustment would overflow the total quantity");
+        }
+        return new Inventory(
+                productId,
+                totalQuantity + delta,
+                availableQuantity + delta,
+                reservedQuantity,
+                soldQuantity,
+                version + 1,
+                now);
+    }
+
     private static void requireNonNegative(int quantity, String name) {
         if (quantity < 0) {
             throw new IllegalArgumentException(name + " must not be negative");

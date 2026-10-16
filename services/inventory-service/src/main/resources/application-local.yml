@@ -1,5 +1,5 @@
-# Local development against `docker compose up`. These credentials only exist in the local
-# Docker Compose database and are not secrets; real environments supply INVENTORY_DB_* variables.
+# Local development against `docker compose up`. These credentials exist only in the local Docker Compose database and
+# are not secrets; real environments supply INVENTORY_DB_* variables.
 spring:
   datasource:
     url: jdbc:postgresql://localhost:5432/stockforge

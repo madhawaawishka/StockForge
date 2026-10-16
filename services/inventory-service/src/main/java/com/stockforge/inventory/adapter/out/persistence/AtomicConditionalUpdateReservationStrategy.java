@@ -6,7 +6,6 @@ import com.stockforge.inventory.domain.port.ReservationRepository;
 import com.stockforge.inventory.domain.port.StockReservationResult;
 import com.stockforge.inventory.domain.port.StockReservationStrategy;
 import com.stockforge.inventory.domain.port.StrategyType;
-import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
@@ -16,8 +15,6 @@ import org.springframework.transaction.annotation.Transactional;
  * updates queue on the row lock and re-evaluate against the newly committed state, guaranteeing zero overselling with
  * zero read-then-write gap and zero application retries.
  */
-@org.springframework.context.annotation.Primary
-@Component
 class AtomicConditionalUpdateReservationStrategy implements StockReservationStrategy {
 
     private final InventoryRepository inventories;

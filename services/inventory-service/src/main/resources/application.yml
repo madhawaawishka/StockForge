@@ -1,33 +1,104 @@
-# Production-style defaults. Every environment-specific value comes from environment variables (12-factor);
-# missing required variables fail startup instead of falling back to unsafe defaults.
+# Production-style defaults. Environment-specific values come from environment variables (12-factor); required
+# variables have no default, so a missing one stops startup instead of silently using an unsafe value.
 spring:
   application:
     name: inventory-service
+  threads:
+    virtual:
+      # Platform vs virtual threads is a benchmark dimension (spec §24, docs/benchmarks/platform-vs-virtual-threads.md).
+      enabled: ${INVENTORY_VIRTUAL_THREADS:false}
+  lifecycle:
+    # Graceful shutdown (spec §33): in-flight requests and the current outbox batch get this long to finish.
+    timeout-per-shutdown-phase: 20s
   datasource:
     url: ${INVENTORY_DB_URL}
     username: ${INVENTORY_DB_USERNAME}
     password: ${INVENTORY_DB_PASSWORD}
     hikari:
       pool-name: inventory-db
-      # Small and fixed on purpose: more connections is not more throughput (spec §24).
+      # Small and fixed on purpose: more connections is not more throughput (spec §24, docs/benchmarks).
       maximum-pool-size: ${INVENTORY_DB_POOL_SIZE:10}
       minimum-idle: ${INVENTORY_DB_POOL_SIZE:10}
-      connection-timeout: 3000
-      # Every connection works in this service's own schema (ADR-002).
+      # Fail fast when the pool is exhausted instead of queueing requests for seconds (spec §23 D).
+      connection-timeout: ${INVENTORY_DB_CONNECTION_TIMEOUT:1000}
       schema: inventory
       data-source-properties:
-        # Server-side timeouts so a stuck query or forgotten transaction cannot hold a pooled connection (spec §23 A).
+        # Server-side timeouts so a stuck query or a forgotten transaction cannot hold a connection (spec §23 A).
         options: "-c statement_timeout=5000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=10000"
+        # Client-side bound for a network partition, where the server can never cancel the statement (spec §27).
+        socketTimeout: 10
   flyway:
     schemas: inventory
     default-schema: inventory
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Redis is optional; waiting for it is not (spec §23 A): a slow Redis counts as unavailable. Lettuce also applies
+      # this timeout to the connection handshake, which 50 ms did not survive (see POSTMORTEM-003), hence 100 ms.
+      timeout: 100ms
+      connect-timeout: 500ms
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      # At-least-once publication without duplicates from producer retries (spec §18).
+      acks: all
+      properties:
+        enable.idempotence: true
+        # Bounded waits: the outbox keeps the event if Kafka is down, so blocking longer only stalls the relay.
+        max.block.ms: 2000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+        linger.ms: 5
+    consumer:
+      auto-offset-reset: earliest
+      properties:
+        # Commit offsets only after the listener and its database transaction succeeded.
+        enable.auto.commit: false
+    listener:
+      ack-mode: record
+      observation-enabled: true
+    template:
+      observation-enabled: true
+  grpc:
+    server:
+      port: ${INVENTORY_GRPC_PORT:9091}
+      shutdown:
+        grace-period: 15s
   jackson:
     deserialization:
-      # Reject unexpected fields instead of silently ignoring them (spec §28).
+      # Reject unexpected fields instead of silently ignoring them (spec §28: mass assignment).
       fail-on-unknown-properties: true
 
 server:
   port: ${INVENTORY_HTTP_PORT:8081}
+  shutdown: graceful
+
+inventory:
+  reservation:
+    ttl: ${INVENTORY_RESERVATION_TTL:10m}
+    purchase-limit: ${INVENTORY_PURCHASE_LIMIT:2}
+    strategy: ${INVENTORY_RESERVATION_STRATEGY:ATOMIC_CONDITIONAL_UPDATE}
+    allow-unsafe-strategy: ${INVENTORY_ALLOW_UNSAFE_STRATEGY:false}
+
+stockforge:
+  messaging:
+    topics:
+      declare: inventory-events,inventory-commands
+      dead-letters: inventory-commands
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      productCache:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        slow-call-duration-threshold: 50ms
+        slow-call-rate-threshold: 50
+        wait-duration-in-open-state: 5s
+        permitted-number-of-calls-in-half-open-state: 3
 
 management:
   endpoints:
@@ -39,34 +110,41 @@ management:
       probes:
         enabled: true
       group:
-        # Readiness includes the database; liveness deliberately does not, so a database blip
-        # does not make the orchestrator restart every instance (spec §33).
+        # Readiness includes the database; liveness does not, so a database blip does not restart every instance.
+        # Redis is optional (NFR-9) and deliberately not part of readiness.
         readiness:
           include: readinessState,db
+  health:
+    redis:
+      enabled: false
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        grpc.server: true
   tracing:
     sampling:
       probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
-  otlp:
+  opentelemetry:
     tracing:
-      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318/v1/traces}
+      export:
+        otlp:
+          endpoint: ${OTEL_TRACES_ENDPOINT:http://localhost:4318/v1/traces}
+  otlp:
+    metrics:
+      export:
+        # Metrics are scraped by Prometheus from /actuator/prometheus; pushing them over OTLP too would duplicate them.
+        enabled: false
+  logging:
+    export:
+      otlp:
+        enabled: false
   info:
     build:
       enabled: true
 
-resilience4j:
-  circuitbreaker:
-    instances:
-      redisCatalogCache:
-        sliding-window-size: 20
-        failure-rate-threshold: 50
-        slow-call-duration-threshold: 100ms
-        wait-duration-in-open-state: 10s
-        permitted-number-of-calls-in-half-open-state: 5
-        register-health-indicator: true
-
 springdoc:
   # Opt-in: a deployed service does not publish its API surface unless asked to (spec §28).
-  # The local profile and the tests enable it.
   api-docs:
     enabled: ${INVENTORY_API_DOCS_ENABLED:false}
     path: /v3/api-docs
@@ -77,5 +155,5 @@ springdoc:
 logging:
   structured:
     format:
-      # Machine-readable JSON logs (Elastic Common Schema) by default; the local profile switches to plain text.
+      # Machine-readable JSON logs (Elastic Common Schema) with trace and span ids; the local profile uses plain text.
       console: ecs

@@ -1,10 +1,16 @@
 package com.stockforge.inventory.application;
 
+import com.stockforge.events.InventoryMessages;
+import com.stockforge.events.Topics;
 import com.stockforge.inventory.domain.model.IdempotencyRecord;
+import com.stockforge.inventory.domain.model.Product;
+import com.stockforge.inventory.domain.model.ProductStatus;
 import com.stockforge.inventory.domain.model.Reservation;
 import com.stockforge.inventory.domain.model.ReservationId;
 import com.stockforge.inventory.domain.port.IdGenerator;
 import com.stockforge.inventory.domain.port.IdempotencyKeyRepository;
+import com.stockforge.inventory.domain.port.OutboxPublisher;
+import com.stockforge.inventory.domain.port.OutboxPublisher.OutboundMessage;
 import com.stockforge.inventory.domain.port.ProductRepository;
 import com.stockforge.inventory.domain.port.ReservationRepository;
 import com.stockforge.inventory.domain.port.StockReservationResult;
@@ -14,7 +20,6 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.HexFormat;
@@ -23,23 +28,37 @@ import java.util.Optional;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Reserves stock atomically using the configured {@link StockReservationStrategy}, enforcing purchase limits and
- * client-scoped idempotency keys (spec §14, §15, §19).
+ * Reserves stock for a user (spec §14, §15, §19), as one transaction:
+ *
+ * <ol>
+ *   <li>claim the idempotency key, or replay the stored outcome of an earlier request with the same key;
+ *   <li>count the units against the user's purchase limit (counter row, prevents write skew);
+ *   <li>move the units from available to reserved with the configured {@link StockReservationStrategy};
+ *   <li>append {@code ReservationCreated} to the outbox.
+ * </ol>
+ *
+ * <p>Deterministic outcomes (reserved, sold out, limit exceeded) are stored with the key and replayed to a retry, so a
+ * client never sees two different answers for one key. A transient outcome (optimistic conflict) forgets the key so the
+ * client can simply retry.
+ *
+ * <p>Lock order is fixed: idempotency row, then the user's limit row, then the product's inventory row. Cancellation
+ * and expiry also take the limit row before the inventory row, so these flows cannot deadlock each other.
  */
 public class ReserveStockUseCase {
 
-    public static final Duration DEFAULT_RESERVATION_TTL = Duration.ofMinutes(10);
-    public static final int DEFAULT_PURCHASE_LIMIT = 2;
+    static final int STATUS_CREATED = 201;
+    static final int STATUS_INSUFFICIENT_STOCK = 409;
+    static final int STATUS_LIMIT_EXCEEDED = 422;
 
     private final ProductRepository products;
     private final StockReservationStrategy strategy;
     private final ReservationRepository reservations;
     private final IdempotencyKeyRepository idempotencyKeys;
     private final UserPurchaseLimitRepository purchaseLimits;
-    private final IdGenerator idGenerator;
+    private final OutboxPublisher outbox;
+    private final IdGenerator ids;
     private final Clock clock;
-    private final int purchaseLimit;
-    private final Duration reservationTtl;
+    private final ReservationPolicy policy;
 
     public ReserveStockUseCase(
             ProductRepository products,
@@ -47,124 +66,129 @@ public class ReserveStockUseCase {
             ReservationRepository reservations,
             IdempotencyKeyRepository idempotencyKeys,
             UserPurchaseLimitRepository purchaseLimits,
-            IdGenerator idGenerator,
-            Clock clock) {
-        this(
-                products,
-                strategy,
-                reservations,
-                idempotencyKeys,
-                purchaseLimits,
-                idGenerator,
-                clock,
-                DEFAULT_PURCHASE_LIMIT,
-                DEFAULT_RESERVATION_TTL);
-    }
-
-    public ReserveStockUseCase(
-            ProductRepository products,
-            StockReservationStrategy strategy,
-            ReservationRepository reservations,
-            IdempotencyKeyRepository idempotencyKeys,
-            UserPurchaseLimitRepository purchaseLimits,
-            IdGenerator idGenerator,
+            OutboxPublisher outbox,
+            IdGenerator ids,
             Clock clock,
-            int purchaseLimit,
-            Duration reservationTtl) {
+            ReservationPolicy policy) {
         this.products = Objects.requireNonNull(products, "products must not be null");
         this.strategy = Objects.requireNonNull(strategy, "strategy must not be null");
         this.reservations = Objects.requireNonNull(reservations, "reservations must not be null");
         this.idempotencyKeys = Objects.requireNonNull(idempotencyKeys, "idempotencyKeys must not be null");
         this.purchaseLimits = Objects.requireNonNull(purchaseLimits, "purchaseLimits must not be null");
-        this.idGenerator = Objects.requireNonNull(idGenerator, "idGenerator must not be null");
+        this.outbox = Objects.requireNonNull(outbox, "outbox must not be null");
+        this.ids = Objects.requireNonNull(ids, "ids must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
-        this.purchaseLimit = purchaseLimit;
-        this.reservationTtl = Objects.requireNonNull(reservationTtl, "reservationTtl must not be null");
+        this.policy = Objects.requireNonNull(policy, "policy must not be null");
     }
 
     @Transactional
     public ReserveStockResult execute(ReserveStockCommand command) {
         Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
-        Instant expiresAt = now.plus(reservationTtl);
 
-        // 1. Validate product exists
-        if (products.findById(command.productId()).isEmpty()) {
+        Optional<Product> product = products.findById(command.productId());
+        // Unknown and inactive products are not reservable; neither outcome is stored, since the catalog may change.
+        if (product.isEmpty() || product.get().status() != ProductStatus.ACTIVE) {
             return new ReserveStockResult.ProductNotFound(command.productId());
         }
 
-        // 2. Handle Idempotency
-        String requestHash = hashRequest(command);
-        Instant idempotencyExpiresAt = now.plus(24, ChronoUnit.HOURS);
-        boolean keyAcquired = idempotencyKeys.tryAcquire(
-                command.idempotencyKey(), command.userId(), requestHash, now, idempotencyExpiresAt);
-
-        if (!keyAcquired) {
-            Optional<IdempotencyRecord> existing =
-                    idempotencyKeys.findByKeyAndUser(command.idempotencyKey(), command.userId());
-            if (existing.isEmpty() || !existing.get().requestHash().equals(requestHash)) {
-                return new ReserveStockResult.IdempotencyConflict(
-                        "Idempotency key reused with different request payload");
-            }
-            if (existing.get().isInProgress()) {
-                return new ReserveStockResult.IdempotencyConflict(
-                        "A request with this idempotency key is already in progress");
-            }
-            if (existing.get().isCompleted() && existing.get().responsePayload() != null) {
-                ReservationId existingId = ReservationId.of(existing.get().responsePayload());
-                Optional<Reservation> replayed = reservations.findById(existingId);
-                if (replayed.isPresent()) {
-                    return new ReserveStockResult.IdempotentReplay(replayed.get());
-                }
-            }
-            return new ReserveStockResult.IdempotencyConflict(
-                    "Idempotency key was previously processed but stored reservation could not be retrieved");
+        String requestHash = hash(command);
+        boolean claimed = idempotencyKeys.tryAcquire(
+                command.idempotencyKey(), command.userId(), requestHash, now, now.plus(policy.idempotencyKeyTtl()));
+        if (!claimed) {
+            return replay(command, requestHash);
         }
 
-        // 3. Purchase limit check
-        boolean limitAcquired = purchaseLimits.tryAcquire(
-                command.userId(), command.productId(), command.quantity(), purchaseLimit, now);
-        if (!limitAcquired) {
-            idempotencyKeys.fail(command.idempotencyKey(), command.userId());
-            return new ReserveStockResult.PurchaseLimitExceeded(command.userId(), purchaseLimit);
+        if (!purchaseLimits.tryAcquire(
+                command.userId(), command.productId(), command.quantity(), policy.purchaseLimit(), now)) {
+            idempotencyKeys.complete(command.idempotencyKey(), command.userId(), STATUS_LIMIT_EXCEEDED, null);
+            return new ReserveStockResult.PurchaseLimitExceeded(command.userId(), policy.purchaseLimit());
         }
 
-        // 4. Construct reservation aggregate
-        ReservationId id = ReservationId.of(idGenerator.newId());
-        Reservation reservation =
-                Reservation.create(id, command.userId(), command.productId(), command.quantity(), expiresAt, now);
+        Reservation reservation = Reservation.create(
+                ReservationId.of(ids.newId()),
+                command.userId(),
+                command.productId(),
+                command.quantity(),
+                now.plus(policy.reservationTtl()),
+                now);
 
-        // 5. Apply reservation strategy
-        StockReservationResult result = strategy.reserve(reservation);
-        return switch (result) {
-            case StockReservationResult.Success s -> {
+        return switch (strategy.reserve(reservation)) {
+            case StockReservationResult.Success success -> {
+                outbox.publish(reservationCreated(reservation));
                 idempotencyKeys.complete(
                         command.idempotencyKey(),
                         command.userId(),
-                        201,
-                        reservation.id().value().toString());
-                yield new ReserveStockResult.Reserved(reservation);
+                        STATUS_CREATED,
+                        reservation.id().toString());
+                yield new ReserveStockResult.Reserved(reservation, false);
             }
-            case StockReservationResult.InsufficientStock i -> {
+            case StockReservationResult.InsufficientStock insufficient -> {
                 purchaseLimits.release(command.userId(), command.productId(), command.quantity(), now);
-                idempotencyKeys.fail(command.idempotencyKey(), command.userId());
+                idempotencyKeys.complete(command.idempotencyKey(), command.userId(), STATUS_INSUFFICIENT_STOCK, null);
                 yield new ReserveStockResult.InsufficientStock(command.productId(), command.quantity());
             }
-            case StockReservationResult.OptimisticConflict o -> {
+            case StockReservationResult.OptimisticConflict conflict -> {
                 purchaseLimits.release(command.userId(), command.productId(), command.quantity(), now);
-                idempotencyKeys.fail(command.idempotencyKey(), command.userId());
+                idempotencyKeys.release(command.idempotencyKey(), command.userId());
                 yield new ReserveStockResult.OptimisticConflict(command.productId());
             }
         };
     }
 
-    private static String hashRequest(ReserveStockCommand command) {
+    private ReserveStockResult replay(ReserveStockCommand command, String requestHash) {
+        // The key exists and its transaction has committed: the insert of the original request blocked until then.
+        IdempotencyRecord existing = idempotencyKeys
+                .findByKeyAndUser(command.idempotencyKey(), command.userId())
+                .orElseThrow(() -> new IllegalStateException("Idempotency key vanished while being replayed"));
+        if (!existing.requestHash().equals(requestHash)) {
+            return new ReserveStockResult.IdempotencyKeyReused(command.idempotencyKey());
+        }
+        Integer status = existing.responseStatus();
+        if (status == null) {
+            throw new IllegalStateException("Idempotency key " + command.idempotencyKey() + " has no stored outcome");
+        }
+        return switch (status) {
+            case STATUS_CREATED -> {
+                ReservationId id = ReservationId.of(existing.responsePayload());
+                Reservation reservation = reservations
+                        .findById(id)
+                        .orElseThrow(() -> new IllegalStateException("Replayed reservation " + id + " is missing"));
+                yield new ReserveStockResult.Reserved(reservation, true);
+            }
+            case STATUS_INSUFFICIENT_STOCK ->
+                new ReserveStockResult.InsufficientStock(command.productId(), command.quantity());
+            case STATUS_LIMIT_EXCEEDED ->
+                new ReserveStockResult.PurchaseLimitExceeded(command.userId(), policy.purchaseLimit());
+            default -> throw new IllegalStateException("Unknown stored outcome " + status);
+        };
+    }
+
+    private static OutboundMessage reservationCreated(Reservation reservation) {
+        String id = reservation.id().toString();
+        return new OutboundMessage(
+                Topics.INVENTORY_EVENTS,
+                InventoryMessages.AGGREGATE_RESERVATION,
+                id,
+                InventoryMessages.ReservationCreated.TYPE,
+                new InventoryMessages.ReservationCreated(
+                        reservation.id().value(),
+                        reservation.userId().value(),
+                        reservation.productId().value(),
+                        reservation.quantity(),
+                        reservation.expiresAt()),
+                id,
+                id);
+    }
+
+    /** The key is scoped by user already, so the hash covers the remaining request fields. */
+    private static String hash(ReserveStockCommand command) {
         try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            String raw = command.productId().value() + ":" + command.quantity();
-            byte[] hash = digest.digest(raw.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(hash);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 not available", e);
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(("reserve:" + command.productId() + ":" + command.quantity())
+                            .getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 is required by every Java platform", impossible);
         }
     }
 }

@@ -52,7 +52,8 @@ public class InMemoryInventoryRepository implements InventoryRepository {
     }
 
     @Override
-    public synchronized void updateUnconditional(ProductId productId, int newAvailable, int newReserved, Instant now) {
+    public synchronized void overwriteAvailableAndReserved(
+            ProductId productId, int newAvailable, int newReserved, Instant now) {
         Inventory current = inventories.get(productId);
         if (current != null) {
             inventories.put(
@@ -86,6 +87,17 @@ public class InMemoryInventoryRepository implements InventoryRepository {
         }
         inventories.put(productId, current.confirmReserved(quantity, now));
         return true;
+    }
+
+    @Override
+    public synchronized Optional<Inventory> adjustStock(ProductId productId, int delta, Instant now) {
+        Inventory current = inventories.get(productId);
+        if (current == null || current.availableQuantity() + delta < 0) {
+            return Optional.empty();
+        }
+        Inventory adjusted = current.adjust(delta, now);
+        inventories.put(productId, adjusted);
+        return Optional.of(adjusted);
     }
 
     public synchronized int count() {

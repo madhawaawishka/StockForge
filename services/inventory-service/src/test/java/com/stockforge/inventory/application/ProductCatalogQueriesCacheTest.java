@@ -1,101 +1,135 @@
 package com.stockforge.inventory.application;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.awaitility.Awaitility.await;
 
 import com.stockforge.inventory.domain.model.Inventory;
 import com.stockforge.inventory.domain.model.Money;
 import com.stockforge.inventory.domain.model.Product;
 import com.stockforge.inventory.domain.model.ProductId;
-import com.stockforge.inventory.domain.model.ProductStatus;
 import com.stockforge.inventory.domain.model.Sku;
-import com.stockforge.inventory.domain.port.InventoryRepository;
-import com.stockforge.inventory.domain.port.ProductCache;
 import com.stockforge.inventory.domain.port.ProductRepository;
+import com.stockforge.inventory.testsupport.InMemoryInventoryRepository;
+import com.stockforge.inventory.testsupport.InMemoryProductCache;
+import com.stockforge.inventory.testsupport.InMemoryProductRepository;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
-import org.junit.jupiter.api.BeforeEach;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
+/** Cache-aside behaviour and stampede protection of catalog reads (spec §17). */
 class ProductCatalogQueriesCacheTest {
 
     private static final Instant NOW = Instant.parse("2026-10-08T10:15:30Z");
     private static final ProductId PRODUCT_ID = ProductId.of(UUID.fromString("0192f5c4-7a1e-7c3b-9a55-2f1e4c8d9b10"));
+    private static final Product PRODUCT =
+            Product.create(PRODUCT_ID, Sku.of("SKU-TEST"), "Product", Money.of("99.99", "USD"), NOW);
 
-    private ProductRepository products;
-    private InventoryRepository inventories;
-    private ProductCache cache;
-    private ProductCatalogQueries queries;
+    private final InMemoryProductCache cache = new InMemoryProductCache();
+    private final InMemoryInventoryRepository inventories = new InMemoryInventoryRepository();
 
-    @BeforeEach
-    void setUp() {
-        products = mock(ProductRepository.class);
-        inventories = mock(InventoryRepository.class);
-        cache = mock(ProductCache.class);
-        queries = new ProductCatalogQueries(products, inventories, cache);
+    @Test
+    void aMissLoadsFromTheDatabaseAndFillsTheCacheAndAHitDoesNotTouchTheDatabase() {
+        CountingProductRepository products = new CountingProductRepository(null);
+        products.insertIfSkuAvailable(PRODUCT);
+        ProductCatalogQueries queries = new ProductCatalogQueries(products, inventories, cache);
+
+        assertThat(queries.findProduct(PRODUCT_ID)).contains(PRODUCT);
+        assertThat(queries.findProduct(PRODUCT_ID)).contains(PRODUCT);
+
+        assertThat(products.loads.get()).isOne();
+        assertThat(cache.getProduct(PRODUCT_ID)).contains(PRODUCT);
     }
 
     @Test
-    void findProductReturnsFromCacheOnHitWithoutCallingRepository() {
-        Product cachedProduct = new Product(
-                PRODUCT_ID,
-                new Sku("SKU-TEST"),
-                "Cached Product",
-                Money.of("99.99", "USD"),
-                ProductStatus.ACTIVE,
-                NOW,
-                NOW);
-        when(cache.getProduct(PRODUCT_ID)).thenReturn(Optional.of(cachedProduct));
+    void availabilityFromTheCacheIsLabelledApproximate() {
+        inventories.insert(Inventory.initial(PRODUCT_ID, 10, NOW));
+        ProductCatalogQueries queries = new ProductCatalogQueries(new InMemoryProductRepository(), inventories, cache);
 
-        Optional<Product> result = queries.findProduct(PRODUCT_ID);
+        Availability first = queries.findAvailability(PRODUCT_ID).orElseThrow();
+        Availability second = queries.findAvailability(PRODUCT_ID).orElseThrow();
 
-        assertThat(result).contains(cachedProduct);
-        verify(products, never()).findById(PRODUCT_ID);
+        assertThat(first.approximate()).isFalse();
+        assertThat(second.approximate()).isTrue();
+        assertThat(second.inventory()).isEqualTo(first.inventory());
     }
 
     @Test
-    void findProductQueriesRepositoryAndPopulatesCacheOnMiss() {
-        Product dbProduct = new Product(
-                PRODUCT_ID,
-                new Sku("SKU-TEST"),
-                "DB Product",
-                Money.of("99.99", "USD"),
-                ProductStatus.ACTIVE,
-                NOW,
-                NOW);
-        when(cache.getProduct(PRODUCT_ID)).thenReturn(Optional.empty());
-        when(products.findById(PRODUCT_ID)).thenReturn(Optional.of(dbProduct));
+    void concurrentMissesOnAColdKeyLoadTheProductOnlyOnce() throws Exception {
+        CountDownLatch databaseResponds = new CountDownLatch(1);
+        CountingProductRepository products = new CountingProductRepository(databaseResponds);
+        products.insertIfSkuAvailable(PRODUCT);
+        // A long coalescing wait so the test controls exactly when the single load completes.
+        ProductCatalogQueries queries = new ProductCatalogQueries(products, inventories, cache, Duration.ofSeconds(30));
 
-        Optional<Product> result = queries.findProduct(PRODUCT_ID);
+        int requests = 50;
+        ConcurrentLinkedQueue<Optional<Product>> results = new ConcurrentLinkedQueue<>();
+        List<Thread> threads = new ArrayList<>();
+        for (int i = 0; i < requests; i++) {
+            threads.add(Thread.ofPlatform().start(() -> results.add(queries.findProduct(PRODUCT_ID))));
+        }
 
-        assertThat(result).contains(dbProduct);
-        verify(cache).putProduct(dbProduct);
+        // One request is loading (blocked in the database); every other one must be parked waiting for that load
+        // instead of querying the database itself.
+        await().atMost(5, TimeUnit.SECONDS)
+                .until(() -> products.loads.get() == 1
+                        && threads.stream()
+                                        .filter(t -> t.getState() == Thread.State.TIMED_WAITING)
+                                        .count()
+                                == requests);
+        databaseResponds.countDown();
+        for (Thread thread : threads) {
+            thread.join(5_000);
+        }
+
+        assertThat(products.loads.get()).isOne();
+        assertThat(results).hasSize(requests).allMatch(result -> result.equals(Optional.of(PRODUCT)));
     }
 
-    @Test
-    void findInventoryReturnsFromCacheOnHit() {
-        Inventory cachedInventory = Inventory.initial(PRODUCT_ID, 10, NOW);
-        when(cache.getInventory(PRODUCT_ID)).thenReturn(Optional.of(cachedInventory));
+    /** Counts database loads; optionally blocks each load until the test lets it finish. */
+    private static final class CountingProductRepository implements ProductRepository {
 
-        Optional<Inventory> result = queries.findInventory(PRODUCT_ID);
+        private final InMemoryProductRepository delegate = new InMemoryProductRepository();
+        private final AtomicInteger loads = new AtomicInteger();
+        private final CountDownLatch gate;
 
-        assertThat(result).contains(cachedInventory);
-        verify(inventories, never()).findByProductId(PRODUCT_ID);
-    }
+        CountingProductRepository(CountDownLatch gate) {
+            this.gate = gate;
+        }
 
-    @Test
-    void findInventoryQueriesRepositoryAndPopulatesCacheOnMiss() {
-        Inventory dbInventory = Inventory.initial(PRODUCT_ID, 10, NOW);
-        when(cache.getInventory(PRODUCT_ID)).thenReturn(Optional.empty());
-        when(inventories.findByProductId(PRODUCT_ID)).thenReturn(Optional.of(dbInventory));
+        @Override
+        public boolean insertIfSkuAvailable(Product product) {
+            return delegate.insertIfSkuAvailable(product);
+        }
 
-        Optional<Inventory> result = queries.findInventory(PRODUCT_ID);
+        @Override
+        public Optional<Product> findById(ProductId id) {
+            loads.incrementAndGet();
+            if (gate != null) {
+                try {
+                    gate.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return delegate.findById(id);
+        }
 
-        assertThat(result).contains(dbInventory);
-        verify(cache).putInventory(dbInventory);
+        @Override
+        public List<Product> findFirst(int limit) {
+            return delegate.findFirst(limit);
+        }
+
+        @Override
+        public List<Product> findAfter(ProductId after, int limit) {
+            return delegate.findAfter(after, limit);
+        }
     }
 }

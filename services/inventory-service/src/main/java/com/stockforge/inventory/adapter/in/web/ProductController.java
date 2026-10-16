@@ -73,7 +73,7 @@ class ProductController {
     @Operation(summary = "Get current stock availability for a product")
     AvailabilityResponse getAvailability(@PathVariable UUID productId) {
         ProductId id = ProductId.of(productId);
-        return catalog.findInventory(id)
+        return catalog.findAvailability(id)
                 .map(AvailabilityResponse::from)
                 .orElseThrow(() -> ApiProblems.productNotFound(id));
     }

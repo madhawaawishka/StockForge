@@ -8,6 +8,7 @@ import com.stockforge.inventory.domain.model.Money;
 import com.stockforge.inventory.domain.model.ProductId;
 import com.stockforge.inventory.domain.model.ProductStatus;
 import com.stockforge.inventory.domain.model.Sku;
+import com.stockforge.inventory.testsupport.InMemoryAuditLog;
 import com.stockforge.inventory.testsupport.InMemoryInventoryRepository;
 import com.stockforge.inventory.testsupport.InMemoryProductRepository;
 import com.stockforge.inventory.testsupport.SequentialIdGenerator;
@@ -23,8 +24,9 @@ class CreateProductUseCaseTest {
 
     private final InMemoryProductRepository products = new InMemoryProductRepository();
     private final InMemoryInventoryRepository inventories = new InMemoryInventoryRepository();
+    private final InMemoryAuditLog auditLog = new InMemoryAuditLog();
     private final CreateProductUseCase useCase = new CreateProductUseCase(
-            products, inventories, new SequentialIdGenerator(), Clock.fixed(NOW, ZoneOffset.UTC));
+            products, inventories, auditLog, new SequentialIdGenerator(), Clock.fixed(NOW, ZoneOffset.UTC));
 
     @Test
     void createsAnActiveProductWithFullyAvailableInitialStock() {
@@ -38,6 +40,17 @@ class CreateProductUseCaseTest {
         });
         assertThat(products.count()).isOne();
         assertThat(inventories.count()).isOne();
+    }
+
+    @Test
+    void recordsWhoCreatedTheProductInTheAuditLog() {
+        useCase.execute(command("SNEAKER-RED-42", 100));
+
+        assertThat(auditLog.entries()).singleElement().satisfies(entry -> {
+            assertThat(entry.actorId()).isEqualTo("admin-1");
+            assertThat(entry.action()).isEqualTo("PRODUCT_CREATED");
+            assertThat(entry.details()).containsEntry("initialStock", 100);
+        });
     }
 
     @Test
@@ -70,6 +83,7 @@ class CreateProductUseCaseTest {
     }
 
     private static CreateProductCommand command(String sku, int initialStock) {
-        return new CreateProductCommand(Sku.of(sku), "Limited Edition Sneaker", Money.of("19.99", "USD"), initialStock);
+        return new CreateProductCommand(
+                Sku.of(sku), "Limited Edition Sneaker", Money.of("19.99", "USD"), initialStock, "admin-1");
     }
 }

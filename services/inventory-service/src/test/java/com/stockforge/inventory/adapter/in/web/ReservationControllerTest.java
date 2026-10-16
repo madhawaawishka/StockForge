@@ -10,6 +10,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.stockforge.inventory.adapter.in.TransientFailureRetry;
 import com.stockforge.inventory.application.CancelReservationResult;
 import com.stockforge.inventory.application.CancelReservationUseCase;
 import com.stockforge.inventory.application.GetReservationUseCase;
@@ -25,7 +26,9 @@ import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
@@ -62,9 +65,18 @@ class ReservationControllerTest {
     @MockitoBean
     private GetReservationUseCase getReservation;
 
+    /** The real retry helper; with one attempt it is a pass-through in this slice test. */
+    @TestConfiguration
+    static class RetryConfiguration {
+        @Bean
+        TransientFailureRetry transientFailureRetry() {
+            return new TransientFailureRetry(1);
+        }
+    }
+
     @Test
     void reserveReturns201WithLocationAndBody() throws Exception {
-        given(reserveStock.execute(any())).willReturn(new ReserveStockResult.Reserved(RESERVATION));
+        given(reserveStock.execute(any())).willReturn(new ReserveStockResult.Reserved(RESERVATION, false));
 
         mockMvc.perform(post("/api/v1/reservations")
                         .header("Idempotency-Key", "key-123")
@@ -91,14 +103,14 @@ class ReservationControllerTest {
     }
 
     @Test
-    void idempotentReplayReturns200WithReplayedHeader() throws Exception {
-        given(reserveStock.execute(any())).willReturn(new ReserveStockResult.IdempotentReplay(RESERVATION));
+    void idempotentReplayReturnsTheOriginalStatusWithReplayedHeader() throws Exception {
+        given(reserveStock.execute(any())).willReturn(new ReserveStockResult.Reserved(RESERVATION, true));
 
         mockMvc.perform(post("/api/v1/reservations")
                         .header("Idempotency-Key", "key-123")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(VALID_RESERVE_JSON))
-                .andExpect(status().isOk())
+                .andExpect(status().isCreated())
                 .andExpect(header().string("Idempotent-Replayed", "true"))
                 .andExpect(jsonPath("$.id").value(RESERVATION_ID.toString()));
     }
@@ -131,7 +143,7 @@ class ReservationControllerTest {
 
     @Test
     void getReservationReturns200() throws Exception {
-        given(getReservation.execute(RESERVATION_ID)).willReturn(Optional.of(RESERVATION));
+        given(getReservation.execute(RESERVATION_ID, Optional.empty())).willReturn(Optional.of(RESERVATION));
 
         mockMvc.perform(get("/api/v1/reservations/{id}", RESERVATION_ID))
                 .andExpect(status().isOk())
@@ -141,7 +153,7 @@ class ReservationControllerTest {
 
     @Test
     void getUnknownReservationReturns404() throws Exception {
-        given(getReservation.execute(RESERVATION_ID)).willReturn(Optional.empty());
+        given(getReservation.execute(RESERVATION_ID, Optional.empty())).willReturn(Optional.empty());
 
         mockMvc.perform(get("/api/v1/reservations/{id}", RESERVATION_ID))
                 .andExpect(status().isNotFound())
@@ -152,7 +164,8 @@ class ReservationControllerTest {
     @Test
     void cancelReturns200() throws Exception {
         Reservation cancelled = RESERVATION.cancel(NOW.plusSeconds(30));
-        given(cancelReservation.execute(RESERVATION_ID)).willReturn(new CancelReservationResult.Cancelled(cancelled));
+        given(cancelReservation.execute(RESERVATION_ID, Optional.empty()))
+                .willReturn(new CancelReservationResult.Cancelled(cancelled));
 
         mockMvc.perform(post("/api/v1/reservations/{id}/cancel", RESERVATION_ID))
                 .andExpect(status().isOk())
@@ -161,7 +174,7 @@ class ReservationControllerTest {
 
     @Test
     void cancelTerminalReservationReturns409() throws Exception {
-        given(cancelReservation.execute(RESERVATION_ID))
+        given(cancelReservation.execute(RESERVATION_ID, Optional.empty()))
                 .willReturn(new CancelReservationResult.InvalidState(RESERVATION_ID, ReservationStatus.CANCELLED));
 
         mockMvc.perform(post("/api/v1/reservations/{id}/cancel", RESERVATION_ID))

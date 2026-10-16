@@ -8,17 +8,16 @@ import com.stockforge.inventory.domain.port.StockReservationResult;
 import com.stockforge.inventory.domain.port.StockReservationStrategy;
 import com.stockforge.inventory.domain.port.StrategyType;
 import java.util.Optional;
-import org.springframework.stereotype.Component;
 
 /**
  * Naive reservation strategy (spec §14, W2-03).
  *
- * <p><strong>TEST-ONLY / BENCHMARK-ONLY:</strong> Demonstrates the classic lost-update race condition. It reads the
- * stock level into application memory, verifies it, pauses briefly (simulating non-atomic processing), and writes back
- * without a version check or a {@code WHERE available_quantity >= :qty} guard. Under concurrent load, multiple threads
- * read the same stock and overwrite each other, causing overselling.
+ * <p><strong>UNSAFE, for demonstrations only.</strong> It is never wired unless
+ * {@code inventory.reservation.allow-unsafe-strategy=true}, and startup refuses it otherwise. Demonstrates the classic
+ * lost-update race condition. It reads the stock level into application memory, verifies it, pauses briefly (simulating
+ * non-atomic processing), and writes back without a version check or a {@code WHERE available_quantity >= :qty} guard.
+ * Under concurrent load, multiple threads read the same stock and overwrite each other, causing overselling.
  */
-@Component
 class NaiveReservationStrategy implements StockReservationStrategy {
 
     private final InventoryRepository inventories;
@@ -52,7 +51,8 @@ class NaiveReservationStrategy implements StockReservationStrategy {
             Thread.currentThread().interrupt();
         }
 
-        inventories.updateUnconditional(reservation.productId(), newAvailable, newReserved, reservation.createdAt());
+        inventories.overwriteAvailableAndReserved(
+                reservation.productId(), newAvailable, newReserved, reservation.createdAt());
         reservations.insert(reservation);
         return new StockReservationResult.Success();
     }

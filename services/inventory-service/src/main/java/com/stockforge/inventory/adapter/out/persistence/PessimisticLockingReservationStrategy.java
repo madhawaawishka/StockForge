@@ -8,7 +8,6 @@ import com.stockforge.inventory.domain.port.StockReservationResult;
 import com.stockforge.inventory.domain.port.StockReservationStrategy;
 import com.stockforge.inventory.domain.port.StrategyType;
 import java.util.Optional;
-import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
@@ -17,7 +16,6 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>Acquires an exclusive lock on the inventory row ({@code SELECT ... FOR UPDATE}) before mutating stock. Guarantees
  * zero overselling by serializing concurrent transactions on the row lock.
  */
-@Component
 class PessimisticLockingReservationStrategy implements StockReservationStrategy {
 
     private final InventoryRepository inventories;
