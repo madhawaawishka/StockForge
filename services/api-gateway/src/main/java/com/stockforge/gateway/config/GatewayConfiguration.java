@@ -1,28 +1,45 @@
 package com.stockforge.gateway.config;
 
-import com.stockforge.gateway.application.OrderGatewayUseCase;
-import com.stockforge.gateway.application.ProductGatewayQueries;
-import com.stockforge.gateway.application.ReservationGatewayUseCase;
-import com.stockforge.gateway.domain.port.InventoryClient;
-import com.stockforge.gateway.domain.port.OrderClient;
+import com.stockforge.gateway.application.AdminUseCases;
+import com.stockforge.gateway.application.StorefrontUseCases;
+import com.stockforge.gateway.domain.port.InventoryApi;
+import com.stockforge.gateway.domain.port.OrderApi;
+import io.swagger.v3.oas.models.Components;
+import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.info.Info;
+import io.swagger.v3.oas.models.security.SecurityScheme;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-@Configuration
-public class GatewayConfiguration {
+/** Composition root of the API gateway (ADR-004). */
+@Configuration(proxyBeanMethods = false)
+@EnableConfigurationProperties(GatewayProperties.class)
+class GatewayConfiguration {
 
     @Bean
-    public ProductGatewayQueries productGatewayQueries(InventoryClient inventoryClient) {
-        return new ProductGatewayQueries(inventoryClient);
+    StorefrontUseCases storefrontUseCases(InventoryApi inventory, OrderApi orders, GatewayProperties properties) {
+        return new StorefrontUseCases(inventory, orders, properties.paymentSimulationEnabled());
     }
 
     @Bean
-    public ReservationGatewayUseCase reservationGatewayUseCase(InventoryClient inventoryClient) {
-        return new ReservationGatewayUseCase(inventoryClient);
+    AdminUseCases adminUseCases(InventoryApi inventory, OrderApi orders) {
+        return new AdminUseCases(inventory, orders);
     }
 
     @Bean
-    public OrderGatewayUseCase orderGatewayUseCase(OrderClient orderClient) {
-        return new OrderGatewayUseCase(orderClient);
+    OpenAPI stockforgeOpenApi() {
+        return new OpenAPI()
+                .info(new Info()
+                        .title("StockForge API")
+                        .version("v1")
+                        .description("Flash-sale reservations and checkout. Errors are RFC 9457 Problem Details."))
+                .components(new Components()
+                        .addSecuritySchemes(
+                                "bearer",
+                                new SecurityScheme()
+                                        .type(SecurityScheme.Type.HTTP)
+                                        .scheme("bearer")
+                                        .bearerFormat("JWT")));
     }
 }

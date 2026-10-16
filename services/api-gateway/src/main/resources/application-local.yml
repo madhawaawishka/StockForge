@@ -1,0 +1,19 @@
+# Local development against `docker compose up`.
+#
+# The JWT secret below exists only for local development and the local load tests (load-tests/lib/auth.js uses the
+# same value). It is not a secret: every real environment supplies GATEWAY_JWT_SECRET from its secret store.
+gateway:
+  payment-simulation-enabled: true
+  jwt:
+    secret: stockforge-local-development-only-hmac-key
+
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+
+logging:
+  structured:
+    format:
+      console: ""

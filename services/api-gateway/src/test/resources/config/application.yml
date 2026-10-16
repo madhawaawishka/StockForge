@@ -1,0 +1,28 @@
+# Test-only overrides, layered on top of src/main/resources/application.yml.
+logging:
+  structured:
+    format:
+      console: ""
+
+gateway:
+  jwt:
+    secret: test-only-hmac-key-of-at-least-32-bytes!
+  rate-limit:
+    policies:
+      reservations:
+        capacity: 5
+        refill-per-second: 0.01
+
+management:
+  tracing:
+    export:
+      otlp:
+        enabled: false
+
+spring:
+  autoconfigure:
+    # The fake downstream services run in this test's in-process gRPC server. Spring would protect that server with
+    # the gateway's own JWT resource server, which real Inventory/Order servers do not have; turn it off for the fakes.
+    exclude:
+      - org.springframework.boot.grpc.server.autoconfigure.security.GrpcServerSecurityAutoConfiguration
+      - org.springframework.boot.grpc.server.autoconfigure.security.GrpcServerOAuth2ResourceServerAutoConfiguration
