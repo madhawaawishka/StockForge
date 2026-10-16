@@ -1,0 +1,106 @@
+# Unit tests for alert_rules.yml, run with: promtool test rules alert_rules_test.yml (CI job "observability").
+# They pin the metric names and thresholds, so renaming a metric in code without updating its alert fails the build
+# instead of silently disabling the alert.
+rule_files:
+  - alert_rules.yml
+
+evaluation_interval: 15s
+
+tests:
+  - name: an invariant violation pages immediately
+    interval: 15s
+    input_series:
+      - series: 'stockforge_inventory_invariant_violations{application="inventory-service"}'
+        values: "0 0 1 1"
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: StockInvariantViolation
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: StockInvariantViolation
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              application: inventory-service
+            exp_annotations:
+              summary: "Inventory rows violate available + reserved + sold = total (or a purchase limit is exceeded)"
+              description: "The reconciliation job found 1 violating rows. Overselling may have happened; treat as a P1."
+              runbook_url: "docs/runbooks/RUNBOOK-001-stock-invariant-violation.md"
+
+  - name: outbox events older than 30 s for a minute alert
+    interval: 15s
+    input_series:
+      - series: 'stockforge_outbox_oldest_pending_age_seconds{application="order-service"}'
+        values: "0 15 31 46 61 76 91"
+    alert_rule_test:
+      - eval_time: 45s
+        alertname: OutboxEventsStuck
+        exp_alerts: []
+      - eval_time: 90s
+        alertname: OutboxEventsStuck
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              application: order-service
+            exp_annotations:
+              summary: "The oldest unpublished outbox event in order-service is 1m 31s old"
+              description: "Kafka is unreachable or the relay is stuck. No event is lost (they stay in PostgreSQL) but the saga is stalled."
+              runbook_url: "docs/runbooks/RUNBOOK-003-outbox-relay-lag.md"
+
+  - name: a dead-lettered message raises a warning naming the topic
+    interval: 1m
+    input_series:
+      - series: 'stockforge_kafka_dead_lettered_total{application="order-service",topic="payment-events"}'
+        values: "0 0 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MessagesDeadLettered
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              application: order-service
+              topic: payment-events
+            exp_annotations:
+              summary: "Messages were moved to payment-events.DLT"
+              description: "1 messages from payment-events could not be processed by order-service and wait for inspection and replay."
+              runbook_url: "docs/runbooks/RUNBOOK-002-dlq-messages-detected.md"
+
+  - name: a service is down only when none of its addresses answers
+    interval: 1m
+    input_series:
+      - series: 'up{application="inventory-service",instance="inventory-service:8081"}'
+        values: "1 1 1 1 1"
+      - series: 'up{application="inventory-service",instance="host.docker.internal:8081"}'
+        values: "0 0 0 0 0"
+      - series: 'up{application="order-service",instance="order-service:8082"}'
+        values: "0 0 0 0 0"
+      - series: 'up{application="order-service",instance="host.docker.internal:8082"}'
+        values: "0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              application: order-service
+            exp_annotations:
+              summary: "order-service cannot be scraped at any of its addresses"
+              runbook_url: "docs/runbooks/RUNBOOK-009-service-down.md"
+
+  - name: reservation 5xx at 14x the budget rate pages
+    interval: 1m
+    input_series:
+      # 1000 requests per minute, 2% of them 5xx: 20x the 0.1% budget.
+      - series: 'http_server_requests_seconds_count{application="api-gateway",method="POST",uri="/api/v1/reservations",status="201"}'
+        values: "0+980x70"
+      - series: 'http_server_requests_seconds_count{application="api-gateway",method="POST",uri="/api/v1/reservations",status="503"}'
+        values: "0+20x70"
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: ReservationErrorBudgetFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "Reservation 5xx rate is burning the 30-day error budget 14x too fast"
+              runbook_url: "docs/observability/slos.md"

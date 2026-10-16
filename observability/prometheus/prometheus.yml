@@ -1,3 +1,9 @@
+# Prometheus configuration for the local stack, mounted into grafana/otel-lgtm as /otel-lgtm/prometheus.yaml.
+#
+# Each service is scraped at two addresses, because the stack supports two ways of running the services:
+#   - in Docker Compose (`docker compose --profile apps up`): reachable by service name on the compose network;
+#   - on the host (`./mvnw ... spring-boot:run`): reachable from the container as host.docker.internal.
+# Only one of the two is up at a time, so "service down" alerts use max by (application) (up) rather than up alone.
 global:
   scrape_interval: 5s
   evaluation_interval: 5s
@@ -5,38 +11,48 @@ global:
 rule_files:
   - alert_rules.yml
 
+# Kept from the image's default configuration: the bundled OpenTelemetry collector writes its own metrics over OTLP.
+otlp:
+  promote_resource_attributes:
+    - service.name
+    - service.instance.id
+storage:
+  tsdb:
+    out_of_order_time_window: 10m
+
 scrape_configs:
-  - job_name: 'api-gateway'
-    metrics_path: '/actuator/prometheus'
+  - job_name: api-gateway
+    metrics_path: /actuator/prometheus
     static_configs:
-      - targets: ['host.docker.internal:8080', 'localhost:8080']
+      # The gateway serves metrics on its management port, not on the public API port.
+      - targets: ["api-gateway:8180", "host.docker.internal:8180"]
         labels:
-          application: 'api-gateway'
+          application: api-gateway
 
-  - job_name: 'inventory-service'
-    metrics_path: '/actuator/prometheus'
+  - job_name: inventory-service
+    metrics_path: /actuator/prometheus
     static_configs:
-      - targets: ['host.docker.internal:8081', 'localhost:8081']
+      - targets: ["inventory-service:8081", "host.docker.internal:8081"]
         labels:
-          application: 'inventory-service'
+          application: inventory-service
 
-  - job_name: 'order-service'
-    metrics_path: '/actuator/prometheus'
+  - job_name: order-service
+    metrics_path: /actuator/prometheus
     static_configs:
-      - targets: ['host.docker.internal:8082', 'localhost:8082']
+      - targets: ["order-service:8082", "host.docker.internal:8082"]
         labels:
-          application: 'order-service'
+          application: order-service
 
-  - job_name: 'payment-service'
-    metrics_path: '/actuator/prometheus'
+  - job_name: payment-service
+    metrics_path: /actuator/prometheus
     static_configs:
-      - targets: ['host.docker.internal:8083', 'localhost:8083']
+      - targets: ["payment-service:8083", "host.docker.internal:8083"]
         labels:
-          application: 'payment-service'
+          application: payment-service
 
-  - job_name: 'notification-worker'
-    metrics_path: '/actuator/prometheus'
+  - job_name: notification-worker
+    metrics_path: /actuator/prometheus
     static_configs:
-      - targets: ['host.docker.internal:8084', 'localhost:8084']
+      - targets: ["notification-worker:8084", "host.docker.internal:8084"]
         labels:
-          application: 'notification-worker'
+          application: notification-worker

@@ -1,90 +1,188 @@
+# Alerts and SLO recording rules (spec §25). Every alert links to a runbook in docs/runbooks.
+#
+# Metric names are what the services actually export (Micrometer -> Prometheus naming: dots become underscores,
+# counters gain _total, base units are appended). The SLOs themselves are defined in docs/observability/slos.md.
 groups:
+  # ---------------------------------------------------------------------------------------------------------------
+  # SLIs for the public reservation endpoint, measured at the gateway (the user-visible boundary).
+  # ---------------------------------------------------------------------------------------------------------------
+  - name: stockforge-slo-recording
+    rules:
+      # SLO-1 availability: share of reservation requests that did not fail on the server side (5xx).
+      - record: stockforge:reservation_errors:ratio_rate5m
+        expr: >
+          sum(rate(http_server_requests_seconds_count{application="api-gateway",method="POST",uri="/api/v1/reservations",status=~"5.."}[5m]))
+          / clamp_min(sum(rate(http_server_requests_seconds_count{application="api-gateway",method="POST",uri="/api/v1/reservations"}[5m])), 1e-9)
+      - record: stockforge:reservation_errors:ratio_rate30m
+        expr: >
+          sum(rate(http_server_requests_seconds_count{application="api-gateway",method="POST",uri="/api/v1/reservations",status=~"5.."}[30m]))
+          / clamp_min(sum(rate(http_server_requests_seconds_count{application="api-gateway",method="POST",uri="/api/v1/reservations"}[30m])), 1e-9)
+      - record: stockforge:reservation_errors:ratio_rate1h
+        expr: >
+          sum(rate(http_server_requests_seconds_count{application="api-gateway",method="POST",uri="/api/v1/reservations",status=~"5.."}[1h]))
+          / clamp_min(sum(rate(http_server_requests_seconds_count{application="api-gateway",method="POST",uri="/api/v1/reservations"}[1h])), 1e-9)
+      - record: stockforge:reservation_errors:ratio_rate6h
+        expr: >
+          sum(rate(http_server_requests_seconds_count{application="api-gateway",method="POST",uri="/api/v1/reservations",status=~"5.."}[6h]))
+          / clamp_min(sum(rate(http_server_requests_seconds_count{application="api-gateway",method="POST",uri="/api/v1/reservations"}[6h])), 1e-9)
+
+      # SLO-2 latency: share of reservation requests slower than 300 ms (NFR-3). The gateway publishes an explicit
+      # le="0.3" bucket (management.metrics.distribution.slo), so this is an exact count, not an interpolation.
+      - record: stockforge:reservation_slow:ratio_rate5m
+        expr: >
+          1 - sum(rate(http_server_requests_seconds_bucket{application="api-gateway",method="POST",uri="/api/v1/reservations",le="0.3"}[5m]))
+          / clamp_min(sum(rate(http_server_requests_seconds_count{application="api-gateway",method="POST",uri="/api/v1/reservations"}[5m])), 1e-9)
+      - record: stockforge:reservation_slow:ratio_rate1h
+        expr: >
+          1 - sum(rate(http_server_requests_seconds_bucket{application="api-gateway",method="POST",uri="/api/v1/reservations",le="0.3"}[1h]))
+          / clamp_min(sum(rate(http_server_requests_seconds_count{application="api-gateway",method="POST",uri="/api/v1/reservations"}[1h])), 1e-9)
+
+      # SLO-4 event freshness: share of outbox events acknowledged by Kafka more than 1 s after commit (NFR-7).
+      - record: stockforge:outbox_late:ratio_rate5m
+        expr: >
+          1 - sum by (application) (rate(stockforge_outbox_publish_lag_seconds_bucket{le="1.0"}[5m]))
+          / clamp_min(sum by (application) (rate(stockforge_outbox_publish_lag_seconds_count[5m])), 1e-9)
+
+  # ---------------------------------------------------------------------------------------------------------------
+  # Alerts required by spec §25, plus the ones the failure-injection tests showed we need.
+  # ---------------------------------------------------------------------------------------------------------------
   - name: stockforge-alerts
     rules:
       - alert: StockInvariantViolation
-        expr: stockforge_inventory_invariant_violations > 0
-        for: 0m
+        expr: max by (application) (stockforge_inventory_invariant_violations) > 0
         labels:
           severity: critical
-          team: platform-core
         annotations:
-          summary: "Stock conservation invariant violation detected"
-          description: "Inventory reconciliation discovered a mismatch between physical stock and total reservations/sales, or negative available quantity."
+          summary: "Inventory rows violate available + reserved + sold = total (or a purchase limit is exceeded)"
+          description: "The reconciliation job found {{ $value }} violating rows. Overselling may have happened; treat as a P1."
           runbook_url: "docs/runbooks/RUNBOOK-001-stock-invariant-violation.md"
 
-      - alert: DeadLetterQueueNotEmpty
-        expr: kafka_consumergroup_lag{topic=~".*-dlt"} > 0
-        for: 1m
+      - alert: MessagesDeadLettered
+        expr: sum by (application, topic) (increase(stockforge_kafka_dead_lettered_total[5m])) > 0
         labels:
           severity: warning
-          team: platform-core
         annotations:
-          summary: "Messages detected in Dead Letter Queue (DLT)"
-          description: "Dead letter queue contains failed events awaiting operator inspection or replay."
+          summary: "Messages were moved to {{ $labels.topic }}.DLT"
+          description: "{{ $value }} messages from {{ $labels.topic }} could not be processed by {{ $labels.application }} and wait for inspection and replay."
           runbook_url: "docs/runbooks/RUNBOOK-002-dlq-messages-detected.md"
 
       - alert: KafkaConsumerLagHigh
-        expr: kafka_consumergroup_lag > 500
-        for: 1m
+        expr: max by (application) (kafka_consumer_fetch_manager_records_lag_max) > 1000
+        for: 5m
         labels:
           severity: warning
-          team: platform-core
         annotations:
-          summary: "Kafka consumer group lag exceeded 500 messages"
-          description: "Consumer group {{ $labels.group }} on topic {{ $labels.topic }} is falling behind by {{ $value }} messages."
-          runbook_url: "docs/runbooks/RUNBOOK-003-outbox-relay-lag.md"
+          summary: "{{ $labels.application }} is more than 1000 records behind on a partition"
+          description: "Consumers are not keeping up; saga steps and notifications are delayed."
+          runbook_url: "docs/runbooks/RUNBOOK-006-kafka-consumer-lag.md"
 
-      - alert: OutboxEventStuck
-        expr: stockforge_outbox_oldest_pending_age_seconds > 60
+      - alert: OutboxEventsStuck
+        expr: max by (application) (stockforge_outbox_oldest_pending_age_seconds) > 30
         for: 1m
         labels:
           severity: critical
-          team: platform-core
         annotations:
-          summary: "Transactional outbox relay lag exceeded 60 seconds"
-          description: "Oldest pending outbox event age is {{ $value }}s in service {{ $labels.job }}, indicating relay stall or Kafka outage."
+          summary: "The oldest unpublished outbox event in {{ $labels.application }} is {{ $value | humanizeDuration }} old"
+          description: "Kafka is unreachable or the relay is stuck. No event is lost (they stay in PostgreSQL) but the saga is stalled."
           runbook_url: "docs/runbooks/RUNBOOK-003-outbox-relay-lag.md"
 
-      - alert: HikariPoolExhausted
-        expr: hikaricp_connections_pending > 0
-        for: 30s
+      - alert: OutboxPublishLagSloAtRisk
+        expr: stockforge:outbox_late:ratio_rate5m > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5% of {{ $labels.application }} events take over 1 s to reach Kafka (NFR-7)"
+          runbook_url: "docs/runbooks/RUNBOOK-003-outbox-relay-lag.md"
+
+      - alert: DatabasePoolStarved
+        expr: max by (application, pool) (hikaricp_connections_pending) > 0
+        for: 1m
         labels:
           severity: critical
-          team: platform-core
         annotations:
-          summary: "HikariCP connection pool exhausted or pending callers queued"
-          description: "Threads are blocked waiting for database connections in pool {{ $labels.pool }} for >30s."
+          summary: "Requests in {{ $labels.application }} are queueing for a connection from pool {{ $labels.pool }}"
+          description: "The pool is exhausted; requests fail fast with 503 after the connection timeout."
           runbook_url: "docs/runbooks/RUNBOOK-004-connection-pool-starvation.md"
 
-      - alert: ReservationLatencyHigh
-        expr: histogram_quantile(0.99, sum(rate(http_server_requests_seconds_bucket{uri=~"/api/v1/reservations.*"}[1m])) by (le)) > 0.05
+      - alert: CircuitBreakerOpen
+        expr: max by (application, name) (resilience4j_circuitbreaker_state{state="open"}) == 1
         for: 1m
         labels:
-          severity: warning
-          team: platform-core
-        annotations:
-          summary: "P99 reservation latency exceeded 50ms (SLO violation)"
-          description: "P99 latency is currently {{ $value }}s, breaching the 50ms latency objective under SLO-1."
-          runbook_url: "docs/observability/slos.md"
-
-      - alert: CircuitBreakerOpen
-        expr: resilience4j_circuitbreaker_state{state="open"} == 1
-        for: 15s
-        labels:
           severity: critical
-          team: platform-core
         annotations:
-          summary: "Circuit breaker opened for downstream service"
-          description: "Resilience4j circuit breaker {{ $labels.name }} opened in {{ $labels.job }} due to high error rate or slow responses."
+          summary: "Circuit breaker {{ $labels.name }} in {{ $labels.application }} is open"
+          description: "Calls to the dependency fail fast; the gateway answers 503 + Retry-After."
           runbook_url: "docs/runbooks/RUNBOOK-005-circuit-breaker-open.md"
 
-      - alert: HighHttp5xxErrorRate
-        expr: (sum(rate(http_server_requests_seconds_count{status=~"5.."}[1m])) / sum(rate(http_server_requests_seconds_count[1m]))) > 0.01
-        for: 1m
+      - alert: RateLimiterDegraded
+        expr: sum by (application) (rate(stockforge_rate_limit_decisions_total{outcome=~"fail_open|fail_closed"}[5m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The rate limiter cannot reach Redis and is failing open (ADR-010)"
+          description: "Per-user limits are not enforced until Redis is back; database protections (purchase limits, conditional updates) still hold."
+          runbook_url: "docs/runbooks/RUNBOOK-007-redis-unavailable.md"
+
+      - alert: SagaCompensationRateHigh
+        expr: >
+          sum(rate(stockforge_saga_compensations_total[10m]))
+          / clamp_min(sum(rate(stockforge_saga_compensations_total[10m])) + sum(rate(stockforge_checkout_completed_total[10m])), 1e-9)
+          > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 20% of checkouts end in compensation"
+          description: "Payments are failing or timing out, or reservations expire before payment completes."
+          runbook_url: "docs/runbooks/RUNBOOK-008-saga-compensations.md"
+
+      - alert: ServiceDown
+        expr: max by (application) (up) == 0
+        for: 2m
         labels:
           severity: critical
-          team: platform-core
         annotations:
-          summary: "HTTP 5xx error rate exceeded 1%"
-          description: "Overall 5xx failure rate across StockForge services reached {{ $value | humanizePercentage }}, consuming error budget."
+          summary: "{{ $labels.application }} cannot be scraped at any of its addresses"
+          runbook_url: "docs/runbooks/RUNBOOK-009-service-down.md"
+
+  # ---------------------------------------------------------------------------------------------------------------
+  # Multi-window, multi-burn-rate SLO alerts (Google SRE Workbook, ch. 5): page on fast budget burn, ticket on slow.
+  # ---------------------------------------------------------------------------------------------------------------
+  - name: stockforge-slo-alerts
+    rules:
+      # SLO-1: 99.9% of reservations succeed -> error budget 0.1%. 14.4x burns 2% of a 30-day budget in an hour.
+      - alert: ReservationErrorBudgetFastBurn
+        expr: >
+          stockforge:reservation_errors:ratio_rate5m > (14.4 * 0.001)
+          and stockforge:reservation_errors:ratio_rate1h > (14.4 * 0.001)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Reservation 5xx rate is burning the 30-day error budget 14x too fast"
           runbook_url: "docs/observability/slos.md"
+
+      - alert: ReservationErrorBudgetSlowBurn
+        expr: >
+          stockforge:reservation_errors:ratio_rate30m > (6 * 0.001)
+          and stockforge:reservation_errors:ratio_rate6h > (6 * 0.001)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Reservation 5xx rate is burning the 30-day error budget 6x too fast"
+          runbook_url: "docs/observability/slos.md"
+
+      # SLO-2: 99% of reservations complete within 300 ms -> 1% budget. Spec §25: "P99 above SLO for 5 min".
+      - alert: ReservationLatencySloBurn
+        expr: >
+          stockforge:reservation_slow:ratio_rate5m > (14.4 * 0.01)
+          and stockforge:reservation_slow:ratio_rate1h > (14.4 * 0.01)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Too many reservations take longer than 300 ms (P99 objective, NFR-3)"
+          runbook_url: "docs/runbooks/RUNBOOK-004-connection-pool-starvation.md"
