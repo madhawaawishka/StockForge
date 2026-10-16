@@ -22,6 +22,8 @@ class HexagonalArchitectureTest {
             .adapter("kafka", "..adapter.in.kafka..")
             .adapter("persistence", "..adapter.out.persistence..")
             .adapter("messaging", "..adapter.out.messaging..")
+            .adapter("provider", "..adapter.out.provider..")
+            .adapter("id", "..adapter.out.id..")
             .ignoreDependency(resideInAPackage("..config.."), alwaysTrue());
 
     @ArchTest
@@ -30,7 +32,7 @@ class HexagonalArchitectureTest {
             .resideInAPackage("..domain..")
             .should()
             .onlyDependOnClassesThat()
-            .resideInAnyPackage("java..", "..domain..", "com.stockforge.events..")
+            .resideInAnyPackage("java..", "..domain..")
             .because("the domain must be testable and understandable without any framework");
 
     @ArchTest
@@ -60,7 +62,11 @@ class HexagonalArchitectureTest {
     @ArchTest
     static final ArchRule adaptersAreNotPublicApi = classes()
             .that()
-            .resideInAnyPackage("..adapter.in.kafka..", "..adapter.out.persistence..")
+            .resideInAnyPackage(
+                    "..adapter.in.kafka..",
+                    "..adapter.out.persistence..",
+                    "..adapter.out.messaging..",
+                    "..adapter.out.provider..")
             .should()
             .notBePublic()
             .because("adapters are implementation details reached only through ports or Kafka listeners");

@@ -1,0 +1,17 @@
+# Local development against `docker compose up`. These credentials exist only in the local Docker Compose database and
+# are not secrets; real environments supply PAYMENT_DB_* variables.
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/stockforge
+    username: payment_svc
+    password: payment_local_only
+
+# Local demos may pick the payment outcome per order (X-Payment-Simulation header at the gateway).
+payment:
+  simulation:
+    allow-requested-outcome: true
+
+logging:
+  structured:
+    format:
+      console: ""

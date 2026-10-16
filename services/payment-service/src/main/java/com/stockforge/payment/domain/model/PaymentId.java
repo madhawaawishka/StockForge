@@ -12,4 +12,9 @@ public record PaymentId(UUID value) {
     public static PaymentId of(UUID value) {
         return new PaymentId(value);
     }
+
+    @Override
+    public String toString() {
+        return value.toString();
+    }
 }

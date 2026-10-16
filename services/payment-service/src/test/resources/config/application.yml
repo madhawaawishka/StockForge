@@ -1,0 +1,16 @@
+# Test-only overrides, layered on top of src/main/resources/application.yml.
+logging:
+  structured:
+    format:
+      console: ""
+
+payment:
+  simulation:
+    allow-requested-outcome: true
+    latency: 5ms
+
+management:
+  tracing:
+    export:
+      otlp:
+        enabled: false

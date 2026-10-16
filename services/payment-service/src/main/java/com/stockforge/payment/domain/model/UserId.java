@@ -12,4 +12,9 @@ public record UserId(UUID value) {
     public static UserId of(UUID value) {
         return new UserId(value);
     }
+
+    @Override
+    public String toString() {
+        return value.toString();
+    }
 }
