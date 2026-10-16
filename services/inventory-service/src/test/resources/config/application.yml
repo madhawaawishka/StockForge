@@ -12,3 +12,20 @@ springdoc:
     enabled: true
   swagger-ui:
     enabled: true
+
+spring:
+  datasource:
+    hikari:
+      # Tests check correctness under contention, not latency: let requests queue for a connection.
+      connection-timeout: 10000
+
+inventory:
+  expiry:
+    poll-interval: 200ms
+
+management:
+  tracing:
+    export:
+      otlp:
+        # No trace backend in tests; tracing still runs so context propagation code is exercised.
+        enabled: false

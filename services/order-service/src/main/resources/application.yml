@@ -1,7 +1,10 @@
-# Order Service application configuration (spec §10, §16, §24)
+# Order service: checkout saga orchestrator (spec §10, §16). Environment-specific values come from environment
+# variables; required ones have no default.
 spring:
   application:
     name: order-service
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
   datasource:
     url: ${ORDER_DB_URL}
     username: ${ORDER_DB_USERNAME}
@@ -10,37 +13,73 @@ spring:
       pool-name: order-db
       maximum-pool-size: ${ORDER_DB_POOL_SIZE:10}
       minimum-idle: ${ORDER_DB_POOL_SIZE:10}
-      connection-timeout: 3000
+      connection-timeout: ${ORDER_DB_CONNECTION_TIMEOUT:1000}
       schema: ordering
       data-source-properties:
         options: "-c statement_timeout=5000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=10000"
+        # Client-side bound for a network partition, where the server can never cancel the statement (spec §27).
+        socketTimeout: 10
   flyway:
     schemas: ordering
     default-schema: ordering
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
-    consumer:
-      group-id: order-service-group
-      auto-offset-reset: earliest
-      enable-auto-commit: false
     producer:
       acks: all
-      retries: 3
+      properties:
+        enable.idempotence: true
+        max.block.ms: 2000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+        linger.ms: 5
+    consumer:
+      auto-offset-reset: earliest
+      properties:
+        enable.auto.commit: false
     listener:
+      ack-mode: record
       observation-enabled: true
     template:
       observation-enabled: true
+  grpc:
+    server:
+      port: ${ORDER_GRPC_PORT:9092}
+      shutdown:
+        grace-period: 15s
+    client:
+      channel:
+        inventory:
+          target: ${INVENTORY_GRPC_TARGET:static://localhost:9091}
   jackson:
     deserialization:
       fail-on-unknown-properties: true
 
 server:
   port: ${ORDER_HTTP_PORT:8082}
+  shutdown: graceful
 
 order:
-  grpc:
-    port: ${ORDER_GRPC_PORT:9091}
-    enabled: ${ORDER_GRPC_ENABLED:true}
+  checkout:
+    payment-timeout: ${ORDER_PAYMENT_TIMEOUT:2m}
+
+stockforge:
+  messaging:
+    topics:
+      declare: order-events,payment-commands,inventory-commands,payment-events,inventory-events
+      dead-letters: payment-events,inventory-events
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      inventory:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        slow-call-duration-threshold: 500ms
+        slow-call-rate-threshold: 80
+        wait-duration-in-open-state: 5s
+        permitted-number-of-calls-in-half-open-state: 3
 
 management:
   endpoints:
@@ -54,22 +93,29 @@ management:
       group:
         readiness:
           include: readinessState,db
+  metrics:
+    distribution:
+      percentiles-histogram:
+        grpc.server: true
   tracing:
     sampling:
       probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
-  otlp:
+  opentelemetry:
     tracing:
-      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318/v1/traces}
+      export:
+        otlp:
+          endpoint: ${OTEL_TRACES_ENDPOINT:http://localhost:4318/v1/traces}
+  otlp:
+    metrics:
+      export:
+        enabled: false
+  logging:
+    export:
+      otlp:
+        enabled: false
   info:
     build:
       enabled: true
-
-resilience4j:
-  bulkhead:
-    instances:
-      dltReplay:
-        max-concurrent-calls: 1
-        max-wait-duration: 0ms
 
 logging:
   structured:

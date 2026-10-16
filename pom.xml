@@ -22,6 +22,7 @@
     <modules>
         <module>libs/proto</module>
         <module>libs/event-schemas</module>
+        <module>libs/messaging</module>
         <module>services/inventory-service</module>
         <module>services/order-service</module>
         <module>services/api-gateway</module>
@@ -33,23 +34,40 @@
         <java.version>21</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
-        <!-- Versions not managed by Spring Boot -->
+        <!-- Security overrides of versions Spring Boot 4.1.1 manages: Trivy found CRITICAL CVEs in Tomcat 11.0.24 and
+             HIGH ones in Jackson 3.1.5 / 2.21.5 (2026-10-16), all fixed in the patch releases below. Boot's own
+             version properties keep the override in one visible place; delete each line once a Boot release ships
+             the same or a newer version. -->
+        <tomcat.version>11.0.25</tomcat.version>
+        <jackson-bom.version>3.1.7</jackson-bom.version>
+        <jackson-2-bom.version>2.21.7</jackson-2-bom.version>
+        <!-- Transitive dependency of kafka-clients (HIGH CVE in 1.10.1); remove with a kafka-clients release that has it. -->
+        <lz4-java.version>1.11.4</lz4-java.version>
+
+        <!-- Versions not managed by Spring Boot. gRPC, protobuf, Testcontainers, Awaitility and
+             OpenTelemetry versions come from the Spring Boot BOM so every module agrees on them. -->
         <archunit.version>1.5.1</archunit.version>
         <springdoc.version>3.1.1</springdoc.version>
         <spotless.version>3.10.3</spotless.version>
         <palantir-java-format.version>2.102.0</palantir-java-format.version>
         <jacoco.version>0.8.15</jacoco.version>
         <errorprone.version>2.50.0</errorprone.version>
-        <grpc.version>1.69.0</grpc.version>
-        <protobuf.version>3.25.5</protobuf.version>
+        <resilience4j.version>2.4.0</resilience4j.version>
+        <jqwik.version>1.10.2</jqwik.version>
+        <!-- Code generation must match the runtime versions managed by Spring Boot 4.1 -->
+        <protoc.version>4.35.1</protoc.version>
+        <grpc-codegen.version>1.83.1</grpc-codegen.version>
         <os-maven-plugin.version>1.7.1</os-maven-plugin.version>
         <protobuf-maven-plugin.version>0.6.1</protobuf-maven-plugin.version>
-        <resilience4j.version>2.2.0</resilience4j.version>
-        <toxiproxy.version>1.20.4</toxiproxy.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
+            <dependency>
+                <groupId>at.yawk.lz4</groupId>
+                <artifactId>lz4-java</artifactId>
+                <version>${lz4-java.version}</version>
+            </dependency>
             <dependency>
                 <groupId>com.tngtech.archunit</groupId>
                 <artifactId>archunit-junit5</artifactId>
@@ -60,21 +78,10 @@
                 <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
                 <version>${springdoc.version}</version>
             </dependency>
-            <!-- Observability & Distributed Tracing (spec §25) -->
-            <dependency>
-                <groupId>io.micrometer</groupId>
-                <artifactId>micrometer-tracing-bridge-otel</artifactId>
-                <version>${micrometer-tracing.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>io.opentelemetry</groupId>
-                <artifactId>opentelemetry-exporter-otlp</artifactId>
-                <version>${opentelemetry.version}</version>
-            </dependency>
-            <!-- Resilience (spec §23) -->
+            <!-- Resilience (spec §23): Spring Boot 4 starter, so YAML instance configuration and metrics apply -->
             <dependency>
                 <groupId>io.github.resilience4j</groupId>
-                <artifactId>resilience4j-spring-boot3</artifactId>
+                <artifactId>resilience4j-spring-boot4</artifactId>
                 <version>${resilience4j.version}</version>
             </dependency>
             <dependency>
@@ -82,11 +89,27 @@
                 <artifactId>resilience4j-micrometer</artifactId>
                 <version>${resilience4j.version}</version>
             </dependency>
-            <!-- Failure Injection / Chaos Testing (spec §27) -->
+            <!-- Property-based tests (spec §29) -->
             <dependency>
-                <groupId>org.testcontainers</groupId>
-                <artifactId>toxiproxy</artifactId>
-                <version>${toxiproxy.version}</version>
+                <groupId>net.jqwik</groupId>
+                <artifactId>jqwik</artifactId>
+                <version>${jqwik.version}</version>
+            </dependency>
+            <!-- Internal modules -->
+            <dependency>
+                <groupId>com.stockforge</groupId>
+                <artifactId>proto</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.stockforge</groupId>
+                <artifactId>event-schemas</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.stockforge</groupId>
+                <artifactId>messaging</artifactId>
+                <version>${project.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
@@ -112,6 +135,9 @@
                                  Its JDK-internal access flags live in .mvn/jvm.config. -->
                             <arg>-XDcompilePolicy=simple</arg>
                             <arg>--should-stop=ifError=FLOW</arg>
+                            <!-- Required by Error Prone on JDK 21 (CI and the Docker build use Temurin 21); a no-op
+                                 on newer JDKs. Without it, every compile on JDK 21 fails. -->
+                            <arg>-XDaddTypeAnnotationsToSymbol=true</arg>
                             <arg>-Xplugin:ErrorProne</arg>
                         </compilerArgs>
                         <failOnWarning>true</failOnWarning>

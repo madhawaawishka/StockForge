@@ -1,0 +1,57 @@
+name: Load test
+
+# Manual: load tests are minutes long and their numbers depend on the runner, so they never gate a merge. Results
+# from a GitHub-hosted runner are only comparable with other runs on the same runner type.
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: k6 scenario
+        type: choice
+        options: [reservation-contention, checkout, spike, soak]
+        default: reservation-contention
+      strategy:
+        description: Inventory reservation strategy
+        type: choice
+        options: [ATOMIC_CONDITIONAL_UPDATE, PESSIMISTIC_LOCKING, OPTIMISTIC_LOCKING]
+        default: ATOMIC_CONDITIONAL_UPDATE
+      k6_env:
+        description: Extra k6 variables, e.g. "-e STOCK=500 -e BUYERS=5000 -e RATE=500"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  load-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      INVENTORY_RESERVATION_STRATEGY: ${{ inputs.strategy }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker compose --profile apps up -d --build --wait --wait-timeout 600
+      - name: Run ${{ inputs.scenario }}
+        env:
+          # Passed through the environment and checked, never interpolated into the script (script injection).
+          K6_ARGS: ${{ inputs.k6_env }}
+          SCENARIO: ${{ inputs.scenario }}
+        run: |
+          if [[ ! "$K6_ARGS" =~ ^(-e\ [A-Z_]+=[A-Za-z0-9_.:/-]+\ ?)*$ ]]; then
+            echo "k6_env must look like: -e NAME=value -e OTHER=value" >&2; exit 1
+          fi
+          mkdir -p load-tests/results && chmod 777 load-tests/results
+          # shellcheck disable=SC2086 # K6_ARGS is a validated list of -e flags
+          docker run --rm --network host -v "$PWD/load-tests:/scripts" $K6_ARGS grafana/k6:1.3.0 \
+            run --summary-export /scripts/results/summary.json "/scripts/$SCENARIO.js"
+      - name: Database invariants hold
+        if: always()
+        run: bash scripts/verify-invariants.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: k6-${{ inputs.scenario }}-${{ inputs.strategy }}
+          path: load-tests/results/
+      - if: always()
+        run: docker compose --profile apps down -v

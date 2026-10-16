@@ -6,6 +6,10 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 
+/**
+ * Conversions between domain types and JDBC types. The PostgreSQL driver maps {@code TIMESTAMPTZ} to
+ * {@link OffsetDateTime} but cannot bind {@link Instant} directly.
+ */
 final class SqlTypes {
 
     private SqlTypes() {}

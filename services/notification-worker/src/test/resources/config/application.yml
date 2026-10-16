@@ -1,0 +1,10 @@
+logging:
+  structured:
+    format:
+      console: ""
+
+management:
+  tracing:
+    export:
+      otlp:
+        enabled: false

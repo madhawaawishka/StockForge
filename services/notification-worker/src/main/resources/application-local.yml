@@ -1,0 +1,12 @@
+# Local development against `docker compose up`. These credentials exist only in the local Docker Compose database and
+# are not secrets; real environments supply NOTIFICATION_DB_* variables.
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/stockforge
+    username: notification_svc
+    password: notification_local_only
+
+logging:
+  structured:
+    format:
+      console: ""

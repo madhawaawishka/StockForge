@@ -1,68 +1,71 @@
+// Flash sale on one hot product (spec §26 scenario 1): far more buyers than units, all arriving at once.
+// Pass criteria: exactly STOCK reservations succeed (no oversell, no undersell), every other buyer gets a clean
+// 409 "insufficient stock", there are no 5xx, and successful reservations meet the 300 ms P99 objective (NFR-3).
+//
+//   k6 run -e STOCK=100 -e BUYERS=2000 -e RATE=500 load-tests/reservation-contention.js
+//   ./scripts/verify-invariants.sh        (afterwards: database-level proof)
+//
+// Every request uses a new user id, so neither the per-user rate limit nor the purchase limit interferes: the only
+// thing standing between the buyers and overselling is the reservation strategy.
 import http from 'k6/http';
 import { check } from 'k6';
-import { Counter, Rate, Trend } from 'k6/metrics';
-import { createToken, authHeaders } from './lib/auth.js';
-import { getBaseUrl, randomUuid } from './lib/helpers.js';
+import { Counter, Trend } from 'k6/metrics';
+import { jsonHeaders, token } from './lib/auth.js';
+import { BASE_URL, createProduct, uuid } from './lib/helpers.js';
 
-// Custom Metrics
-const successfulReservations = new Counter('successful_reservations');
-const insufficientStockResponses = new Counter('insufficient_stock_responses');
-const unexpectedErrors = new Counter('unexpected_errors');
-const reservationLatency = new Trend('reservation_latency_ms');
+const STOCK = parseInt(__ENV.STOCK || '100', 10);
+const BUYERS = parseInt(__ENV.BUYERS || '2000', 10);
+const RATE = parseInt(__ENV.RATE || '500', 10);
+
+const reserved = new Counter('reservations_succeeded');
+const soldOut = new Counter('reservations_sold_out');
+const unexpected = new Counter('reservations_unexpected');
+// Latency per outcome: a k6 request tag cannot depend on the response, so the outcome trends are recorded here.
+const reservedLatency = new Trend('latency_reserved', true);
+const soldOutLatency = new Trend('latency_sold_out', true);
 
 export const options = {
   scenarios: {
     flash_sale: {
-      executor: 'per-vu-iterations',
-      vus: 2000,
-      iterations: 1,
-      maxDuration: '1m'
-    }
+      // Open model: requests keep arriving at RATE/s even if the system slows down (no coordinated omission).
+      executor: 'constant-arrival-rate',
+      rate: RATE,
+      timeUnit: '1s',
+      duration: `${Math.ceil(BUYERS / RATE)}s`,
+      preAllocatedVUs: Math.min(RATE, 500),
+      maxVUs: 2000,
+    },
   },
-  thresholds: {
-    'reservation_latency_ms': ['p(99)<50'], // SLO-1: P99 < 50ms
-    'unexpected_errors': ['count==0'],       // Zero unexpected errors
-    'http_req_failed': ['rate<0.96']         // Allow expected 409s (95% of 2000), but reject 5xx
-  }
+  thresholds: Object.assign(
+    {
+      reservations_succeeded: [`count==${STOCK}`],
+      reservations_unexpected: ['count==0'],
+    },
+    // Latency objectives only mean something on a warmed-up system (docs/benchmarks/README.md). CI runs this scenario
+    // right after start-up to prove correctness, and sets CORRECTNESS_ONLY=true.
+    __ENV.CORRECTNESS_ONLY === 'true' ? {} : { latency_reserved: ['p(99)<300'], latency_sold_out: ['p(99)<300'] },
+  ),
+  summaryTrendStats: ['avg', 'p(50)', 'p(95)', 'p(99)', 'max'],
 };
 
-export default function() {
-  const baseUrl = getBaseUrl();
-  const vuId = __VU;
-  const userId = `018f6f5a-3d2b-7000-8000-${vuId.toString().padStart(12, '0')}`;
-  const token = createToken(userId);
-  const headers = authHeaders(token);
-  
-  // Idempotency key per user
-  const idempotencyKey = randomUuid();
-  headers['Idempotency-Key'] = idempotencyKey;
+export function setup() {
+  return { productId: createProduct(STOCK) };
+}
 
-  // Single Hot SKU target (seeded or configured via env)
-  const productId = __ENV.HOT_PRODUCT_ID || '018f6f5a-3d2b-7000-8000-000000000100';
-
-  const payload = JSON.stringify({
-    productId: productId,
-    quantity: 1
+export default function ({ productId }) {
+  const res = http.post(`${BASE_URL}/api/v1/reservations`, JSON.stringify({ productId, quantity: 1 }), {
+    headers: jsonHeaders(token(uuid()), { 'Idempotency-Key': uuid() }),
+    tags: { name: 'POST /api/v1/reservations' },
+    responseCallback: http.expectedStatuses(201, 409),
   });
-
-  const startTime = Date.now();
-  const res = http.post(`${baseUrl}/api/v1/reservations`, payload, { headers });
-  reservationLatency.add(Date.now() - startTime);
-
   if (res.status === 201) {
-    successfulReservations.add(1);
-    check(res, {
-      'reservation created with PENDING status': (r) => r.json('status') === 'PENDING'
-    });
+    reserved.add(1);
+    reservedLatency.add(res.timings.duration);
   } else if (res.status === 409) {
-    insufficientStockResponses.add(1);
-    check(res, {
-      'rejected with insufficient stock': (r) => r.body.includes('insufficient-stock')
-    });
+    soldOut.add(1);
+    soldOutLatency.add(res.timings.duration);
+    check(res, { 'sold out is reported as insufficient-stock': (r) => r.body.includes('insufficient-stock') });
   } else {
-    unexpectedErrors.add(1);
-    check(res, {
-      'unexpected response code': () => false
-    });
+    unexpected.add(1, { status: String(res.status) });
   }
 }

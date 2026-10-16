@@ -1,0 +1,154 @@
+syntax = "proto3";
+
+package stockforge.inventory.v1;
+
+option java_multiple_files = true;
+option java_package = "com.stockforge.inventory.v1";
+
+// Internal gRPC contract of the Inventory Service (spec §12).
+//
+// Error model: expected business outcomes are gRPC status codes chosen by the table in spec §12
+// (FAILED_PRECONDITION, ABORTED, NOT_FOUND, INVALID_ARGUMENT, ...). The machine-readable problem type
+// travels in the "stockforge-problem-type" trailer (for example "insufficient-stock"), so the gateway
+// can return the exact RFC 9457 problem without parsing free-text descriptions.
+//
+// Evolution rules (enforced by `buf breaking`): never renumber or reuse a field; removed fields are
+// declared `reserved`; new fields are additive.
+service InventoryService {
+  rpc CreateProduct (CreateProductRequest) returns (CreateProductResponse);
+  rpc GetProduct (GetProductRequest) returns (GetProductResponse);
+  rpc ListProducts (ListProductsRequest) returns (ListProductsResponse);
+  rpc GetAvailability (GetAvailabilityRequest) returns (GetAvailabilityResponse);
+  rpc AdjustStock (AdjustStockRequest) returns (AdjustStockResponse);
+  rpc ReserveStock (ReserveStockRequest) returns (ReserveStockResponse);
+  rpc GetReservation (GetReservationRequest) returns (GetReservationResponse);
+  rpc CancelReservation (CancelReservationRequest) returns (CancelReservationResponse);
+}
+
+// Timestamps are RFC 3339 strings in UTC; money amounts are decimal strings (never floating point).
+
+message Product {
+  string id = 1;
+  string sku = 2;
+  string name = 3;
+  string price_amount = 4;
+  string price_currency = 5;
+  string status = 6;
+  string created_at = 7;
+  string updated_at = 8;
+}
+
+message Availability {
+  string product_id = 1;
+  int32 total_quantity = 2;
+  int32 available_quantity = 3;
+  int32 reserved_quantity = 4;
+  int32 sold_quantity = 5;
+  string updated_at = 6;
+  // True when the value may be served from a short-lived cache (spec §17); the reservation path
+  // always re-checks the database.
+  bool approximate = 7;
+}
+
+message Reservation {
+  string id = 1;
+  string user_id = 2;
+  string product_id = 3;
+  int32 quantity = 4;
+  string status = 5;
+  string expires_at = 6;
+  string created_at = 7;
+  string updated_at = 8;
+}
+
+message CreateProductRequest {
+  string sku = 1;
+  string name = 2;
+  string price_amount = 3;
+  string price_currency = 4;
+  int32 initial_stock = 5;
+  // Authenticated administrator, recorded in the audit log.
+  string actor_id = 6;
+}
+
+message CreateProductResponse {
+  Product product = 1;
+  Availability availability = 2;
+}
+
+message GetProductRequest {
+  string product_id = 1;
+}
+
+message GetProductResponse {
+  Product product = 1;
+}
+
+message ListProductsRequest {
+  int32 limit = 1;
+  // Opaque cursor from a previous response; empty for the first page.
+  string cursor = 2;
+}
+
+message ListProductsResponse {
+  repeated Product products = 1;
+  // Empty when there are no more pages.
+  string next_cursor = 2;
+}
+
+message GetAvailabilityRequest {
+  string product_id = 1;
+}
+
+message GetAvailabilityResponse {
+  Availability availability = 1;
+}
+
+message AdjustStockRequest {
+  string product_id = 1;
+  // Positive to add received stock, negative to write off available stock.
+  int32 delta = 2;
+  string reason = 3;
+  string actor_id = 4;
+  string idempotency_key = 5;
+}
+
+message AdjustStockResponse {
+  Availability availability = 1;
+  bool idempotent_replay = 2;
+}
+
+message ReserveStockRequest {
+  string product_id = 1;
+  int32 quantity = 2;
+  // Authenticated caller; taken from the token by the gateway, never from the request body.
+  string user_id = 3;
+  string idempotency_key = 4;
+}
+
+message ReserveStockResponse {
+  Reservation reservation = 1;
+  // True when the idempotency key matched an earlier request and its original result is returned.
+  bool idempotent_replay = 2;
+}
+
+message GetReservationRequest {
+  string reservation_id = 1;
+  // Owner check (spec §28): a reservation of another user is reported as NOT_FOUND.
+  // Empty only for privileged callers (administrators, internal services).
+  string requester_user_id = 2;
+}
+
+message GetReservationResponse {
+  Reservation reservation = 1;
+}
+
+message CancelReservationRequest {
+  string reservation_id = 1;
+  // Same owner semantics as GetReservationRequest.requester_user_id.
+  string requester_user_id = 2;
+}
+
+message CancelReservationResponse {
+  Reservation reservation = 1;
+}

@@ -1,0 +1,20 @@
+# Test-only overrides, layered on top of src/main/resources/application.yml.
+logging:
+  structured:
+    format:
+      console: ""
+
+spring:
+  datasource:
+    hikari:
+      connection-timeout: 10000
+
+order:
+  checkout:
+    timeout-scan-interval: 200ms
+
+management:
+  tracing:
+    export:
+      otlp:
+        enabled: false

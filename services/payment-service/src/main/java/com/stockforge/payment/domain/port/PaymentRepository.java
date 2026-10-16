@@ -2,16 +2,20 @@ package com.stockforge.payment.domain.port;
 
 import com.stockforge.payment.domain.model.OrderId;
 import com.stockforge.payment.domain.model.Payment;
-import com.stockforge.payment.domain.model.PaymentId;
 import java.util.Optional;
 
+/** Payments; at most one per order ({@code UNIQUE (order_id)}). */
 public interface PaymentRepository {
 
-    void insert(Payment payment);
-
-    Optional<Payment> findById(PaymentId id);
+    /** Stores the payment unless the order already has one; returns the order's payment either way. */
+    Payment insertOrGetForOrder(Payment payment);
 
     Optional<Payment> findByOrderId(OrderId orderId);
 
-    void update(Payment payment);
+    /**
+     * Stores the transition only if the row is still in {@code before}'s status (spec §16 A).
+     *
+     * @return {@code false} if another transition got there first
+     */
+    boolean saveTransition(Payment before, Payment after);
 }

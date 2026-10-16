@@ -21,11 +21,13 @@ class JdbcUserPurchaseLimitRepository implements UserPurchaseLimitRepository {
     @Override
     public boolean tryAcquire(UserId userId, ProductId productId, int quantity, int maxLimit, Instant now) {
         int rows = jdbc.sql("""
-                        INSERT INTO user_product_limits (user_id, product_id, active_quantity, updated_at)
-                        VALUES (:userId, :productId, :qty, :updatedAt)
+                        INSERT INTO user_product_limits (user_id, product_id, active_quantity, limit_quantity, updated_at)
+                        SELECT :userId, :productId, :qty, :maxLimit, :updatedAt
+                        WHERE :qty <= :maxLimit
                         ON CONFLICT (user_id, product_id) DO UPDATE
                         SET active_quantity = user_product_limits.active_quantity + :qty,
-                            updated_at = :updatedAt
+                            limit_quantity  = :maxLimit,
+                            updated_at      = :updatedAt
                         WHERE user_product_limits.active_quantity + :qty <= :maxLimit
                         """)
                 .param("userId", userId.value())
@@ -41,7 +43,7 @@ class JdbcUserPurchaseLimitRepository implements UserPurchaseLimitRepository {
     public void release(UserId userId, ProductId productId, int quantity, Instant now) {
         jdbc.sql("""
                         UPDATE user_product_limits
-                        SET active_quantity = GREATEST(0, active_quantity - :qty),
+                        SET active_quantity = active_quantity - :qty,
                             updated_at = :updatedAt
                         WHERE user_id = :userId AND product_id = :productId
                         """)
@@ -50,5 +52,7 @@ class JdbcUserPurchaseLimitRepository implements UserPurchaseLimitRepository {
                 .param("qty", quantity)
                 .param("updatedAt", toTimestamp(now))
                 .update();
+        // No GREATEST(0, ...) clamp: releasing more than was acquired is a bug, and the CHECK constraint
+        // (active_quantity >= 0) makes it fail loudly instead of hiding it.
     }
 }

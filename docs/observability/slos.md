@@ -1,62 +1,64 @@
-# Service Level Objectives (SLOs) & Error Budget Policy
+# Service level objectives
 
-StockForge platform reliability goals, Service Level Indicators (SLIs), Service Level Objectives (SLOs), and Error Budget burn rate alert policies (spec §25, §37).
+Four objectives derived from the non-functional requirements (spec §6, §25). Each has an SLI computed from metrics the
+services export, a recording rule, an alert, and a panel on the Grafana dashboards. Thresholds come from the spec, not
+from what the system happens to achieve; measured values are in [docs/benchmarks](../benchmarks/README.md).
 
----
-
-## 1. Objectives Matrix
-
-| Objective ID | Target Metric / SLI | Target Objective (SLO) | Measurement Window | Alert Condition |
+| SLO | Objective | Window | SLI (Prometheus) | Alerts |
 | :--- | :--- | :--- | :--- | :--- |
-| **SLO-1: Reservation Latency** | P99 latency of `POST /api/v1/reservations` | **< 50ms** | Rolling 30 days | `histogram_quantile(0.99, ...) > 0.05` for 1m |
-| **SLO-2: Stock Conservation** | Consistency check: `available + reserved + sold == total` & `available >= 0` | **100% (Zero tolerance)** | Continuous (1m reconciliation) | `stockforge_inventory_invariant_violations > 0` |
-| **SLO-3: Read Availability** | HTTP 2xx/3xx rate for catalog and availability queries (`GET /api/v1/products/**`) | **99.9%** (P50 < 10ms) | Rolling 30 days | 5xx error rate > 0.1% over 5m |
-| **SLO-4: Outbox Relay Latency** | Transaction commit timestamp to Kafka cluster publication time | **P99 < 500ms** | Rolling 30 days | `stockforge_outbox_oldest_pending_age_seconds > 60` |
+| **SLO-1 Reservation availability** | 99.9 % of `POST /api/v1/reservations` do not fail with 5xx | 30 days | `1 - stockforge:reservation_errors:ratio_rate*` | `ReservationErrorBudgetFastBurn`, `ReservationErrorBudgetSlowBurn` |
+| **SLO-2 Reservation latency** (NFR-3) | 99 % of reservations complete within 300 ms at the gateway | 30 days | `1 - stockforge:reservation_slow:ratio_rate*` | `ReservationLatencySloBurn` |
+| **SLO-3 Stock correctness** (NFR-1) | zero invariant violations — no oversell, ever | always | `stockforge_inventory_invariant_violations` | `StockInvariantViolation` |
+| **SLO-4 Event freshness** (NFR-7) | 95 % of events reach Kafka within 1 s of commit | 30 days | `1 - stockforge:outbox_late:ratio_rate5m` | `OutboxPublishLagSloAtRisk`, `OutboxEventsStuck` |
 
----
+## How each SLI is measured
 
-## 2. SLI Specifications
+**Where.** Reservation SLIs are measured at the gateway — the boundary the customer sees — so they include
+authentication, rate limiting, the gRPC hop and the database.
 
-### SLO-1: Reservation Latency
-- **SLI Formula:**
-  $$\text{SLI}_{\text{Reservation}} = \frac{\sum \text{rate}(http\_server\_requests\_seconds\_bucket\{uri \approx "/api/v1/reservations.*", le="0.05"\}[30d])}{\sum \text{rate}(http\_server\_requests\_seconds\_count\{uri \approx "/api/v1/reservations.*"\}[30d])}$$
-- **Rationale:** During high-concurrency flash sales, customers experience friction if checkout locks exceed human perceptual thresholds (50ms).
-- **Measurement Point:** API Gateway boundary before reverse-proxying over gRPC.
+**What counts as good.** `409 insufficient-stock`, `422 purchase-limit-exceeded` and `429 rate-limit-exceeded` are
+correct answers, not errors: a sold-out product must not burn the error budget. Only 5xx responses are bad for SLO-1.
 
-### SLO-2: Stock Conservation Invariant
-- **SLI Formula:**
-  $$\text{SLI}_{\text{Conservation}} = 1.0 - \left(\frac{\text{Minutes with } stockforge\_inventory\_invariant\_violations > 0}{43,200 \text{ min}}\right)$$
-- **Target:** Exactly **100%**. StockForge strictly forbids overselling. A single oversold SKU constitutes an immediate P1 incident.
+**Exact thresholds.** The gateway publishes histogram buckets exactly at 50 ms and 300 ms
+(`management.metrics.distribution.slo.http.server.requests`), and the outbox publish-lag timer has a bucket at
+1 s. The SLIs are therefore ratios of two counters, not interpolated percentiles:
 
-### SLO-3: Read Availability & Latency
-- **SLI Formula:**
-  $$\text{SLI}_{\text{Availability}} = \frac{\sum \text{rate}(http\_server\_requests\_seconds\_count\{uri \approx "/api/v1/products.*", status!\approx "5.."\}[30d])}{\sum \text{rate}(http\_server\_requests\_seconds\_count\{uri \approx "/api/v1/products.*"\}[30d])}$$
-- **Target:** **99.9%** success rate. Latency target: P50 < 10ms (serviced by Redis cache with graceful degradation to PostgreSQL).
+```promql
+# SLO-2: share of reservations slower than 300 ms over 5 minutes
+1 - sum(rate(http_server_requests_seconds_bucket{application="api-gateway",method="POST",uri="/api/v1/reservations",le="0.3"}[5m]))
+  / sum(rate(http_server_requests_seconds_count{application="api-gateway",method="POST",uri="/api/v1/reservations"}[5m]))
+```
 
-### SLO-4: Outbox Delivery Latency
-- **SLI Formula:**
-  $$\text{SLI}_{\text{Outbox}} = \frac{\text{Outbox events published within 500ms}}{\text{Total outbox events created}}$$
-- **Metric Indicator:** `stockforge_outbox_oldest_pending_age_seconds`. When this gauge exceeds 60s, transactional outbox events are delayed, causing downstream saga delays in order confirmation.
+**SLO-3** is not a ratio: the reconciliation job compares stock counters with reservation rows and purchase-limit
+counters every minute; the database CHECK constraints make the most important violations impossible to commit in the
+first place. Any non-zero value pages.
 
----
+## Error budgets and burn-rate alerts
 
-## 3. Multi-Window Multi-Burn-Rate Alerting
+A 99.9 % objective leaves an error budget of 0.1 % of requests per 30 days. Alerts fire on how fast the budget is being
+spent, using two windows so that a short spike does not page and a resolved incident stops paging quickly
+(Google SRE Workbook, chapter 5):
 
-Following Google SRE best practices, alerts fire based on error budget consumption speed rather than static thresholds, preventing alert fatigue while catching severe outages before budget depletion:
+| Alert | Burn rate | Windows (both must exceed) | Budget spent if it continues | Action |
+| :--- | :--- | :--- | :--- | :--- |
+| `ReservationErrorBudgetFastBurn` | 14.4 × | 5 min and 1 h | 2 % per hour | page |
+| `ReservationErrorBudgetSlowBurn` | 6 × | 30 min and 6 h | 5 % per 6 hours | ticket |
+| `ReservationLatencySloBurn` | 14.4 × of the 1 % latency budget | 5 min and 1 h | 2 % per hour | page |
 
-| Severity | Burn Rate | % Budget Consumed | Time to 100% Budget Exhaustion | Short Window | Long Window | Notification Channel |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Critical (Page)** | **14.4x** | 2% in 1 hour | 2 days | 5 minutes | 1 hour | PagerDuty / On-call rotation |
-| **Critical (Page)** | **6x** | 5% in 6 hours | 5 days | 30 minutes | 6 hours | PagerDuty / On-call rotation |
-| **Warning (Ticket)** | **1x** | 10% in 3 days | 30 days | 2 hours | 3 days | Slack / JIRA ticket |
+The rules are unit-tested with `promtool test rules observability/prometheus/alert_rules_test.yml`, including a
+synthetic 2 % error rate that must page.
 
----
+## Error budget policy
 
-## 4. Error Budget Policy & Operational Rules
+- **Budget left:** ship normally.
+- **Budget below 25 %:** risky changes (schema migrations, strategy or pool changes) need a load test against the
+  compose stack first (`load-tests/reservation-contention.js`, `load-tests/checkout.js`).
+- **Budget exhausted:** reliability work takes priority over features until the 30-day window recovers; every
+  incident that spent more than 10 % of the budget gets a postmortem (`docs/postmortems/`).
 
-1. **Budget Status > 20%:** Normal operations. Feature deployments and schema migrations proceed without gating.
-2. **Budget Status between 0% and 20%:** Warning state. High-risk architectural changes require Tech Lead sign-off.
-3. **Budget Status < 0% (Exhausted):**
-   - **Feature Freeze:** Non-critical product feature releases are halted.
-   - **Engineering Shift:** 100% of engineering bandwidth transitions to reliability, performance tuning, and failure mode mitigation.
-   - **Mandatory Postmortem:** Blameless postmortem published within 48 hours for any incident contributing >10% of the budget loss.
+## Limits of these SLOs
+
+- This is a single-node local deployment: the SLOs define the measurement and alerting, they are not a claim of
+  production availability.
+- Latency is measured server-side at the gateway; client-side latency (network, TLS) would be measured by the load
+  tests or real-user monitoring.

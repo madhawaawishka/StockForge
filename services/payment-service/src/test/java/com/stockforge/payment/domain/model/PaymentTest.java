@@ -3,61 +3,54 @@ package com.stockforge.payment.domain.model;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
+/** The payment state machine (spec §16 A). */
 class PaymentTest {
 
-    private final PaymentId paymentId = PaymentId.of(UUID.randomUUID());
-    private final OrderId orderId = OrderId.of(UUID.randomUUID());
-    private final UserId userId = UserId.of(UUID.randomUUID());
-    private final Instant now = Instant.parse("2026-10-11T12:00:00Z");
+    private static final Instant NOW = Instant.parse("2026-10-08T10:15:30Z");
 
-    @Test
-    void paymentCanTransitionFromPendingToSucceeded() {
-        Payment payment = Payment.create(paymentId, orderId, userId, new BigDecimal("49.99"), "USD", "SUCCEEDED", now);
-
-        assertThat(payment.status()).isEqualTo(PaymentStatus.PENDING);
-
-        Payment succeeded = payment.succeed(now.plusSeconds(1));
-        assertThat(succeeded.status()).isEqualTo(PaymentStatus.SUCCEEDED);
-        assertThat(succeeded.simulationOutcome()).isNotNull();
+    private static Payment pending() {
+        return Payment.request(
+                PaymentId.of(UUID.randomUUID()),
+                OrderId.of(UUID.randomUUID()),
+                UserId.of(UUID.randomUUID()),
+                Money.of("49.99", "USD"),
+                NOW);
     }
 
     @Test
-    void paymentCanTransitionFromPendingToFailed() {
-        Payment payment = Payment.create(paymentId, orderId, userId, new BigDecimal("49.99"), "USD", "FAILED", now);
-
-        Payment failed = payment.fail(now.plusSeconds(1));
-        assertThat(failed.status()).isEqualTo(PaymentStatus.FAILED);
+    void aPendingPaymentCanSucceedFailOrTimeOut() {
+        assertThat(pending().succeed(NOW).status()).isEqualTo(PaymentStatus.SUCCEEDED);
+        assertThat(pending().fail(NOW).status()).isEqualTo(PaymentStatus.FAILED);
+        assertThat(pending().timeOut(NOW).status()).isEqualTo(PaymentStatus.TIMED_OUT);
     }
 
     @Test
-    void paymentCanTransitionFromPendingToTimedOut() {
-        Payment payment = Payment.create(paymentId, orderId, userId, new BigDecimal("49.99"), "USD", "TIMED_OUT", now);
-
-        Payment timedOut = payment.timeOut(now.plusSeconds(1));
-        assertThat(timedOut.status()).isEqualTo(PaymentStatus.TIMED_OUT);
+    void onlyACapturedPaymentCanBeRefunded() {
+        assertThat(pending().succeed(NOW).refund(NOW).status()).isEqualTo(PaymentStatus.REFUNDED);
+        assertThatThrownBy(() -> pending().refund(NOW)).isInstanceOf(DomainValidationException.class);
+        assertThatThrownBy(() -> pending().fail(NOW).refund(NOW)).isInstanceOf(DomainValidationException.class);
     }
 
     @Test
-    void succeededPaymentCanBeRefunded() {
-        Payment payment = Payment.create(paymentId, orderId, userId, new BigDecimal("49.99"), "USD", "SUCCEEDED", now);
-        Payment succeeded = payment.succeed(now.plusSeconds(1));
+    void decidedPaymentsAreFinal() {
+        Payment failed = pending().fail(NOW);
 
-        Payment refunded = succeeded.refund(now.plusSeconds(2));
-        assertThat(refunded.status()).isEqualTo(PaymentStatus.REFUNDED);
+        assertThatThrownBy(() -> failed.succeed(NOW)).isInstanceOf(DomainValidationException.class);
+        assertThatThrownBy(() -> pending().succeed(NOW).succeed(NOW)).isInstanceOf(DomainValidationException.class);
     }
 
     @Test
-    void failedPaymentCannotBeRefunded() {
-        Payment payment = Payment.create(paymentId, orderId, userId, new BigDecimal("49.99"), "USD", "FAILED", now);
-        Payment failed = payment.fail(now.plusSeconds(1));
-
-        assertThatThrownBy(() -> failed.refund(now.plusSeconds(2)))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Only SUCCEEDED payments can be refunded");
+    void theAmountMustBePositive() {
+        assertThatThrownBy(() -> Payment.request(
+                        PaymentId.of(UUID.randomUUID()),
+                        OrderId.of(UUID.randomUUID()),
+                        UserId.of(UUID.randomUUID()),
+                        Money.of("0.00", "USD"),
+                        NOW))
+                .isInstanceOf(DomainValidationException.class);
     }
 }

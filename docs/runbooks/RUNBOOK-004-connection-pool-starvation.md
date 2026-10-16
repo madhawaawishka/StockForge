@@ -1,62 +1,40 @@
-# RUNBOOK-004: HikariCP Connection Pool Starvation
+# RUNBOOK-004: Database pool starved / reservations too slow
 
-## Severity: CRITICAL
+**Alerts:**
+- `DatabasePoolStarved` — requests waiting for a connection (`hikaricp_connections_pending > 0`) for 1 min · critical
+- `ReservationLatencySloBurn` — too many reservations slower than 300 ms (NFR-3) · critical
 
-## 1. Description
-The `HikariPoolExhausted` alert fired because `hikaricp_connections_pending > 0` for >30s or `hikaricp_connections_active / hikaricp_connections_max >= 0.95`. Application worker threads or virtual threads are queued waiting for database connections.
+## What it means
+Each service has a small, fixed pool (10 connections; spec §24). When every connection is busy, requests queue for up
+to `connection-timeout` (1 s) and then fail fast with 503 + Retry-After. Typical causes: a slow query, lock contention
+on a hot product, a long transaction, or more instances than the database can serve.
 
-## 2. Immediate Impact
-High latency spikes across the service, HTTP 504 Gateway Timeouts, `SQLTransientConnectionException: Connection is not available, request timed out after 3000ms`.
+## Confirm
+```promql
+max by (application) (hikaricp_connections_active)
+max by (application) (hikaricp_connections_acquire_seconds_max)
+histogram_quantile(0.99, sum by (le) (rate(http_server_requests_seconds_bucket{application="api-gateway",uri="/api/v1/reservations"}[5m])))
+```
+```sql
+-- What is running and what is waiting?
+SELECT pid, usename, state, wait_event_type, wait_event, now() - xact_start AS xact_age, left(query, 100)
+FROM pg_stat_activity WHERE datname = 'stockforge' AND state <> 'idle' ORDER BY xact_age DESC;
+-- Slowest statements since the last reset
+SELECT calls, round(mean_exec_time::numeric, 2) AS mean_ms, left(query, 100)
+FROM pg_stat_statements ORDER BY mean_exec_time DESC LIMIT 10;
+```
+Many sessions in `Lock / transactionid` on one inventory row = hot-row contention (expected in a flash sale; the
+atomic conditional update keeps each lock very short). Waits longer than `lock_timeout` (2 s) are cancelled
+(SQLSTATE `55P03`) and answered 503 + Retry-After; slow commits — a saturated disk — lengthen every lock and show up here
+first. Sessions `idle in transaction` = a transaction left open
+(the server kills them after 10 s).
 
-## 3. Diagnosis Steps
-1. **Check Active Queries in PostgreSQL:**
-   Identify long-running or blocked queries:
-   ```sql
-   SELECT pid, now() - query_start AS duration, query, state, wait_event_type, wait_event
-   FROM pg_stat_activity
-   WHERE state != 'idle' AND backend_type = 'client backend'
-   ORDER BY duration DESC;
-   ```
-2. **Check for Lock Contention & Deadlocks:**
-   ```sql
-   SELECT blocked_locks.pid     AS blocked_pid,
-          blocking_locks.pid    AS blocking_pid,
-          blocked_activity.query    AS blocked_statement,
-          blocking_activity.query   AS blocking_statement
-   FROM  pg_catalog.pg_locks         blocked_locks
-   JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
-   JOIN pg_catalog.pg_locks         blocking_locks 
-        ON blocking_locks.locktype = blocked_locks.locktype
-        AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database
-        AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
-        AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page
-        AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple
-        AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid
-        AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid
-        AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid
-        AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid
-        AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
-        AND blocking_locks.pid != blocked_locks.pid
-   JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
-   WHERE NOT blocked_locks.granted;
-   ```
-3. **Check Connection Leaks:**
-   Verify `idle in transaction` sessions:
-   ```sql
-   SELECT pid, now() - state_change AS idle_duration, query
-   FROM pg_stat_activity
-   WHERE state = 'idle in transaction';
-   ```
+## Mitigate
+- A runaway query: `SELECT pg_cancel_backend(<pid>);`. Statement timeout (5 s) and lock timeout (2 s) bound the damage.
+- Hot product: rate limits and bulkheads shed the excess; do **not** raise the pool size — more connections fighting
+  for one row lock is slower, not faster (docs/benchmarks/connection-pool-sizing.md).
+- If the pessimistic or optimistic strategy is configured, switch back to `ATOMIC_CONDITIONAL_UPDATE`
+  (`INVENTORY_RESERVATION_STRATEGY`).
 
-## 4. Remediation
-1. **Terminate Blocked / Rogue Backends:**
-   ```sql
-   SELECT pg_terminate_backend(<ROGUE_PID>);
-   ```
-2. **Server-Side Timeout Safeguards:**
-   Verify PostgreSQL timeout settings:
-   - `statement_timeout = 5000` (5s max execution)
-   - `lock_timeout = 2000` (2s max wait for locks)
-   - `idle_in_transaction_session_timeout = 10000` (10s max idle in txn)
-3. **DO NOT blindly increase maximum-pool-size:**
-   Adding more connections under lock contention worsens PostgreSQL buffer lock thrashing (Little's Law). Keep pool size sized to `(CPU cores * 2) + effective_spindle_count` (spec §24).
+## Follow-up
+Capture `EXPLAIN (ANALYZE, BUFFERS)` for the slow statement and add the result to docs/benchmarks/query-plans.md.

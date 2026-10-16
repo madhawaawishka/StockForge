@@ -1,5 +1,6 @@
 package com.stockforge.inventory.adapter.in.web;
 
+import com.stockforge.inventory.adapter.in.TransientFailureRetry;
 import com.stockforge.inventory.application.CancelReservationResult;
 import com.stockforge.inventory.application.CancelReservationUseCase;
 import com.stockforge.inventory.application.GetReservationUseCase;
@@ -10,6 +11,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import java.net.URI;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -22,9 +24,12 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.util.UriComponentsBuilder;
 
 /**
- * Reservation REST controller (spec §12, §16, §19).
+ * Internal reservation API of the inventory service (spec §12, §19).
  *
- * <p>Translates HTTP requests into application commands and results into HTTP responses or RFC 9457 problems.
+ * <p>Public clients use the API gateway, which authenticates the caller and takes the user id from the token. This
+ * service-level API exists for integration tests and for benchmarking the concurrency strategies without the gateway
+ * hop; it trusts the {@code userId} in the body, so it must only be reachable on the internal network (see
+ * docs/security.md).
  */
 @RestController
 @RequestMapping("/api/v1/reservations")
@@ -34,14 +39,17 @@ class ReservationController {
     private final ReserveStockUseCase reserveStock;
     private final CancelReservationUseCase cancelReservation;
     private final GetReservationUseCase getReservation;
+    private final TransientFailureRetry retry;
 
     ReservationController(
             ReserveStockUseCase reserveStock,
             CancelReservationUseCase cancelReservation,
-            GetReservationUseCase getReservation) {
+            GetReservationUseCase getReservation,
+            TransientFailureRetry retry) {
         this.reserveStock = reserveStock;
         this.cancelReservation = cancelReservation;
         this.getReservation = getReservation;
+        this.retry = retry;
     }
 
     @PostMapping
@@ -54,7 +62,7 @@ class ReservationController {
             throw ApiProblems.missingIdempotencyKey();
         }
 
-        ReserveStockResult result = reserveStock.execute(request.toCommand(idempotencyKey.trim()));
+        ReserveStockResult result = retry.execute(() -> reserveStock.execute(request.toCommand(idempotencyKey)));
 
         return switch (result) {
             case ReserveStockResult.Reserved r -> {
@@ -62,19 +70,20 @@ class ReservationController {
                         .path("/api/v1/reservations/{id}")
                         .buildAndExpand(r.reservation().id().value())
                         .toUri();
-                yield ResponseEntity.created(location).body(ReservationResponse.from(r.reservation()));
+                // A replay returns the original status and body, flagged for transparency (spec §19).
+                ResponseEntity.BodyBuilder created = ResponseEntity.created(location);
+                if (r.replayed()) {
+                    created.header("Idempotent-Replayed", "true");
+                }
+                yield created.body(ReservationResponse.from(r.reservation()));
             }
-            case ReserveStockResult.IdempotentReplay r ->
-                ResponseEntity.ok()
-                        .header("Idempotent-Replayed", "true")
-                        .body(ReservationResponse.from(r.reservation()));
             case ReserveStockResult.InsufficientStock i ->
                 throw ApiProblems.insufficientStock(i.productId(), i.requestedQuantity());
             case ReserveStockResult.PurchaseLimitExceeded p ->
-                throw ApiProblems.purchaseLimitExceeded(p.userId(), p.maxLimit());
+                throw ApiProblems.purchaseLimitExceeded(p.userId(), p.limit());
             case ReserveStockResult.ProductNotFound p -> throw ApiProblems.productNotFound(p.productId());
             case ReserveStockResult.OptimisticConflict o -> throw ApiProblems.optimisticConflict(o.productId());
-            case ReserveStockResult.IdempotencyConflict c -> throw ApiProblems.idempotencyConflict(c.message());
+            case ReserveStockResult.IdempotencyKeyReused reused -> throw ApiProblems.idempotencyKeyReused();
         };
     }
 
@@ -83,7 +92,7 @@ class ReservationController {
     ReservationResponse get(@PathVariable UUID id) {
         ReservationId reservationId = ReservationId.of(id);
         return getReservation
-                .execute(reservationId)
+                .execute(reservationId, Optional.empty())
                 .map(ReservationResponse::from)
                 .orElseThrow(() -> ApiProblems.reservationNotFound(reservationId));
     }
@@ -92,7 +101,8 @@ class ReservationController {
     @Operation(summary = "Cancel a pending reservation")
     ResponseEntity<ReservationResponse> cancel(@PathVariable UUID id) {
         ReservationId reservationId = ReservationId.of(id);
-        CancelReservationResult result = cancelReservation.execute(reservationId);
+        CancelReservationResult result =
+                retry.execute(() -> cancelReservation.execute(reservationId, Optional.empty()));
 
         return switch (result) {
             case CancelReservationResult.Cancelled c -> ResponseEntity.ok(ReservationResponse.from(c.reservation()));

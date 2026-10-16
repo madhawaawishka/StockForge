@@ -1,29 +1,93 @@
-server:
-  port: 8080
-  shutdown: graceful
-
+# API gateway: the public REST API (spec §10, §12). Environment-specific values come from environment variables; the
+# JWT secret has no default, so the gateway does not start without one.
 spring:
   application:
     name: api-gateway
+  threads:
+    virtual:
+      # Request threads only wait on gRPC calls here, which virtual threads handle cheaply (spec §24).
+      enabled: ${GATEWAY_VIRTUAL_THREADS:true}
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
   data:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
-      timeout: 50ms
-  security:
-    oauth2:
-      resourceserver:
-        jwt:
-          secret: ${JWT_SECRET:default-secret-key-for-development-must-be-32-bytes!}
-
-stockforge:
+      # Redis is optional; waiting for it is not (spec §23 A): a slow Redis counts as unavailable. Lettuce also applies
+      # this timeout to the connection handshake, which 50 ms did not survive (see POSTMORTEM-003), hence 100 ms.
+      timeout: 100ms
+      connect-timeout: 500ms
   grpc:
-    inventory-host: ${INVENTORY_GRPC_HOST:localhost}
-    inventory-port: ${INVENTORY_GRPC_PORT:9091}
-    order-host: ${ORDER_GRPC_HOST:localhost}
-    order-port: ${ORDER_GRPC_PORT:9092}
+    client:
+      channel:
+        inventory:
+          target: ${INVENTORY_GRPC_TARGET:static://localhost:9091}
+        order:
+          target: ${ORDER_GRPC_TARGET:static://localhost:9092}
+  jackson:
+    deserialization:
+      # Reject unexpected fields instead of silently ignoring them (spec §28: mass assignment).
+      fail-on-unknown-properties: true
+
+server:
+  port: ${GATEWAY_HTTP_PORT:8080}
+  shutdown: graceful
+
+gateway:
+  deadline: ${GATEWAY_DOWNSTREAM_DEADLINE:2s}
+  payment-simulation-enabled: ${GATEWAY_PAYMENT_SIMULATION:false}
+  jwt:
+    secret: ${GATEWAY_JWT_SECRET}
+    issuer: ${GATEWAY_JWT_ISSUER:stockforge-auth}
+    audience: ${GATEWAY_JWT_AUDIENCE:stockforge-api}
+  rate-limit:
+    fail-open: ${GATEWAY_RATE_LIMIT_FAIL_OPEN:true}
+    policies:
+      # Starting points from spec §23 C, to be tuned with load tests: bursts of reservations are the attack surface.
+      reservations:
+        capacity: ${GATEWAY_RESERVATION_BURST:10}
+        refill-per-second: ${GATEWAY_RESERVATION_RATE:1}
+      orders:
+        capacity: 20
+        refill-per-second: 1.67
+
+resilience4j:
+  circuitbreaker:
+    configs:
+      downstream:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 50
+        minimum-number-of-calls: 20
+        failure-rate-threshold: 50
+        slow-call-duration-threshold: 1500ms
+        slow-call-rate-threshold: 80
+        wait-duration-in-open-state: 5s
+        permitted-number-of-calls-in-half-open-state: 5
+    instances:
+      inventory:
+        base-config: downstream
+      order:
+        base-config: downstream
+      rateLimiter:
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 5s
+  bulkhead:
+    instances:
+      # Concurrent in-flight calls per downstream service; beyond this the gateway sheds load with 503 (spec §23 D).
+      inventory:
+        max-concurrent-calls: ${GATEWAY_INVENTORY_BULKHEAD:200}
+        max-wait-duration: 0ms
+      order:
+        max-concurrent-calls: ${GATEWAY_ORDER_BULKHEAD:100}
+        max-wait-duration: 0ms
 
 management:
+  server:
+    # The gateway is the public entry point: health and metrics live on a separate port that is not published to the
+    # internet (OWASP API8: security misconfiguration). Prometheus and the orchestrator's probes use this port.
+    port: ${GATEWAY_MANAGEMENT_PORT:8180}
   endpoints:
     web:
       exposure:
@@ -32,35 +96,45 @@ management:
     health:
       probes:
         enabled: true
+  health:
+    redis:
+      enabled: false
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        grpc.client: true
+      # Exact buckets at the SLO thresholds (NFR-3: 300 ms, NFR-5: 50 ms), so the SLIs in alert_rules.yml are plain
+      # counter ratios rather than interpolated quantiles.
+      slo:
+        http.server.requests: 50ms,300ms
   tracing:
     sampling:
       probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
-  otlp:
+  opentelemetry:
     tracing:
-      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318/v1/traces}
+      export:
+        otlp:
+          endpoint: ${OTEL_TRACES_ENDPOINT:http://localhost:4318/v1/traces}
+  otlp:
+    metrics:
+      export:
+        enabled: false
+  logging:
+    export:
+      otlp:
+        enabled: false
+  info:
+    build:
+      enabled: true
 
-resilience4j:
-  circuitbreaker:
-    instances:
-      inventoryService:
-        sliding-window-size: 20
-        failure-rate-threshold: 50
-        slow-call-duration-threshold: 2s
-        wait-duration-in-open-state: 10s
-        permitted-number-of-calls-in-half-open-state: 5
-        register-health-indicator: true
-      orderService:
-        sliding-window-size: 20
-        failure-rate-threshold: 50
-        slow-call-duration-threshold: 2s
-        wait-duration-in-open-state: 10s
-        permitted-number-of-calls-in-half-open-state: 5
-        register-health-indicator: true
-  bulkhead:
-    instances:
-      inventoryService:
-        max-concurrent-calls: 100
-        max-wait-duration: 0ms
-      orderService:
-        max-concurrent-calls: 100
-        max-wait-duration: 0ms
+springdoc:
+  api-docs:
+    enabled: ${GATEWAY_API_DOCS_ENABLED:false}
+  swagger-ui:
+    enabled: ${GATEWAY_API_DOCS_ENABLED:false}
+
+logging:
+  structured:
+    format:
+      console: ecs

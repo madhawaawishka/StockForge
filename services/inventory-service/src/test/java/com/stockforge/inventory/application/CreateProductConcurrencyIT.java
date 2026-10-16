@@ -35,7 +35,7 @@ class CreateProductConcurrencyIT {
     @RepeatedTest(5)
     void concurrentCreatesOfTheSameSkuProduceExactlyOneProduct() throws Exception {
         Sku sku = Sku.of(uniqueSku());
-        CreateProductCommand command = new CreateProductCommand(sku, "Race", Money.of("1.00", "USD"), 10);
+        CreateProductCommand command = new CreateProductCommand(sku, "Race", Money.of("1.00", "USD"), 10, "admin");
         CountDownLatch startingGate = new CountDownLatch(1);
         List<CreateProductResult> results = new ArrayList<>();
 

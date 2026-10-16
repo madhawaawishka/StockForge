@@ -1,163 +1,190 @@
 package com.stockforge.inventory.application;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.stockforge.inventory.domain.model.Inventory;
-import com.stockforge.inventory.domain.model.Money;
-import com.stockforge.inventory.domain.model.Product;
+import com.stockforge.events.InventoryMessages;
+import com.stockforge.events.Topics;
+import com.stockforge.inventory.domain.model.DomainValidationException;
 import com.stockforge.inventory.domain.model.ProductId;
-import com.stockforge.inventory.domain.model.Reservation;
 import com.stockforge.inventory.domain.model.ReservationStatus;
-import com.stockforge.inventory.domain.model.Sku;
 import com.stockforge.inventory.domain.model.UserId;
 import com.stockforge.inventory.domain.port.StockReservationResult;
 import com.stockforge.inventory.domain.port.StockReservationStrategy;
 import com.stockforge.inventory.domain.port.StrategyType;
-import com.stockforge.inventory.testsupport.InMemoryIdempotencyKeyRepository;
-import com.stockforge.inventory.testsupport.InMemoryInventoryRepository;
-import com.stockforge.inventory.testsupport.InMemoryProductRepository;
-import com.stockforge.inventory.testsupport.InMemoryReservationRepository;
-import com.stockforge.inventory.testsupport.InMemoryUserPurchaseLimitRepository;
-import com.stockforge.inventory.testsupport.SequentialIdGenerator;
-import java.time.Clock;
-import java.time.Instant;
-import java.time.ZoneOffset;
+import com.stockforge.inventory.testsupport.InventoryFixture;
+import java.time.Duration;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class ReserveStockUseCaseTest {
 
-    private static final Instant NOW = Instant.parse("2026-10-08T10:15:30Z");
-    private static final ProductId PRODUCT_ID = ProductId.of(UUID.fromString("0192f5c4-7a1e-7c3b-9a55-2f1e4c8d9b10"));
-    private static final UserId USER_ID = UserId.of(UUID.fromString("0192f5c4-6b0d-7e21-8f43-1a2b3c4d5e6f"));
+    private static final UserId ALICE = UserId.of(UUID.fromString("0192f5c4-6b0d-7e21-8f43-1a2b3c4d5e6f"));
+    private static final UserId BOB = UserId.of(UUID.fromString("0192f5c4-6b0d-7e21-8f43-1a2b3c4d5e70"));
+    private static final UserId CAROL = UserId.of(UUID.fromString("0192f5c4-6b0d-7e21-8f43-1a2b3c4d5e71"));
 
-    private InMemoryProductRepository products;
-    private InMemoryInventoryRepository inventories;
-    private InMemoryReservationRepository reservations;
-    private InMemoryIdempotencyKeyRepository idempotencyKeys;
-    private InMemoryUserPurchaseLimitRepository purchaseLimits;
-    private SequentialIdGenerator ids;
-    private Clock clock;
+    private InventoryFixture fixture;
     private ReserveStockUseCase useCase;
+    private ProductId product;
 
     @BeforeEach
     void setUp() {
-        products = new InMemoryProductRepository();
-        inventories = new InMemoryInventoryRepository();
-        reservations = new InMemoryReservationRepository();
-        idempotencyKeys = new InMemoryIdempotencyKeyRepository();
-        purchaseLimits = new InMemoryUserPurchaseLimitRepository();
-        ids = new SequentialIdGenerator();
-        clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        fixture = new InventoryFixture();
+        useCase = useCaseWith(fixture.strategy);
+        product = fixture.product("SNEAKER-1", 3);
+    }
 
-        StockReservationStrategy strategy = new StockReservationStrategy() {
+    @Test
+    void reservesStockAndPublishesReservationCreatedInTheSameTransaction() {
+        ReserveStockResult result = useCase.execute(new ReserveStockCommand("key-1", ALICE, product, 2));
+
+        assertThat(result).isInstanceOf(ReserveStockResult.Reserved.class);
+        var reserved = (ReserveStockResult.Reserved) result;
+        assertThat(reserved.replayed()).isFalse();
+        assertThat(reserved.reservation().status()).isEqualTo(ReservationStatus.PENDING);
+        assertThat(reserved.reservation().expiresAt()).isEqualTo(InventoryFixture.START.plus(Duration.ofMinutes(10)));
+        assertThat(fixture.inventoryOf(product).availableQuantity()).isEqualTo(1);
+        assertThat(fixture.inventoryOf(product).reservedQuantity()).isEqualTo(2);
+        assertThat(fixture.purchaseLimits.heldBy(ALICE, product)).isEqualTo(2);
+
+        assertThat(fixture.outbox.messages()).singleElement().satisfies(message -> {
+            assertThat(message.topic()).isEqualTo(Topics.INVENTORY_EVENTS);
+            assertThat(message.aggregateId())
+                    .isEqualTo(reserved.reservation().id().toString());
+            assertThat(message.payload())
+                    .isEqualTo(new InventoryMessages.ReservationCreated(
+                            reserved.reservation().id().value(),
+                            ALICE.value(),
+                            product.value(),
+                            2,
+                            reserved.reservation().expiresAt()));
+        });
+    }
+
+    @Test
+    void aRetryWithTheSameKeyReplaysTheReservationWithoutReservingAgain() {
+        var first = (ReserveStockResult.Reserved) useCase.execute(new ReserveStockCommand("key-1", ALICE, product, 1));
+
+        ReserveStockResult retry = useCase.execute(new ReserveStockCommand("key-1", ALICE, product, 1));
+
+        assertThat(retry).isEqualTo(new ReserveStockResult.Reserved(first.reservation(), true));
+        assertThat(fixture.inventoryOf(product).reservedQuantity()).isEqualTo(1);
+        assertThat(fixture.reservations.count()).isEqualTo(1);
+        assertThat(fixture.outbox.messages()).hasSize(1);
+    }
+
+    @Test
+    void aRetryOfASoldOutRequestReplaysSoldOutEvenAfterStockReturns() {
+        useCase.execute(new ReserveStockCommand("bob-1", BOB, product, 2));
+        useCase.execute(new ReserveStockCommand("carol-1", CAROL, product, 1));
+        ReserveStockResult soldOut = useCase.execute(new ReserveStockCommand("alice-1", ALICE, product, 1));
+        assertThat(soldOut).isInstanceOf(ReserveStockResult.InsufficientStock.class);
+
+        fixture.inventories.releaseReservedStock(product, 1, InventoryFixture.START);
+
+        // Same key, same request: the client sees the same answer it got the first time (spec §19).
+        assertThat(useCase.execute(new ReserveStockCommand("alice-1", ALICE, product, 1)))
+                .isInstanceOf(ReserveStockResult.InsufficientStock.class);
+        // A new key is a new request.
+        assertThat(useCase.execute(new ReserveStockCommand("alice-2", ALICE, product, 1)))
+                .isInstanceOf(ReserveStockResult.Reserved.class);
+    }
+
+    @Test
+    void reusingAKeyForADifferentRequestIsRejected() {
+        useCase.execute(new ReserveStockCommand("key-1", ALICE, product, 1));
+
+        assertThat(useCase.execute(new ReserveStockCommand("key-1", ALICE, product, 2)))
+                .isEqualTo(new ReserveStockResult.IdempotencyKeyReused("key-1"));
+    }
+
+    @Test
+    void keysAreScopedPerUser() {
+        useCase.execute(new ReserveStockCommand("shared-key", ALICE, product, 1));
+
+        assertThat(useCase.execute(new ReserveStockCommand("shared-key", BOB, product, 1)))
+                .isInstanceOfSatisfying(
+                        ReserveStockResult.Reserved.class,
+                        r -> assertThat(r.replayed()).isFalse());
+    }
+
+    @Test
+    void enforcesThePurchaseLimitAcrossReservations() {
+        useCase.execute(new ReserveStockCommand("key-1", ALICE, product, 1));
+        useCase.execute(new ReserveStockCommand("key-2", ALICE, product, 1));
+
+        assertThat(useCase.execute(new ReserveStockCommand("key-3", ALICE, product, 1)))
+                .isEqualTo(new ReserveStockResult.PurchaseLimitExceeded(ALICE, 2));
+        assertThat(fixture.inventoryOf(product).reservedQuantity()).isEqualTo(2);
+    }
+
+    @Test
+    void insufficientStockLeavesNoTraceInStockOrLimits() {
+        assertThat(useCase.execute(new ReserveStockCommand("key-1", ALICE, product, 2)))
+                .isInstanceOf(ReserveStockResult.Reserved.class);
+        assertThat(useCase.execute(new ReserveStockCommand("key-2", BOB, product, 2)))
+                .isEqualTo(new ReserveStockResult.InsufficientStock(product, 2));
+
+        assertThat(fixture.purchaseLimits.heldBy(BOB, product)).isZero();
+        assertThat(fixture.inventoryOf(product).availableQuantity()).isEqualTo(1);
+        assertThat(fixture.outbox.messages()).hasSize(1);
+    }
+
+    @Test
+    void anOptimisticConflictForgetsTheKeySoTheClientCanRetry() {
+        StockReservationStrategy alwaysConflicting = new StockReservationStrategy() {
             @Override
             public StrategyType type() {
-                return StrategyType.ATOMIC_CONDITIONAL_UPDATE;
+                return StrategyType.OPTIMISTIC_LOCKING;
             }
 
             @Override
-            public StockReservationResult reserve(Reservation reservation) {
-                boolean decremented = inventories.decrementAvailableAndIncrementReserved(
-                        reservation.productId(), reservation.quantity(), reservation.createdAt());
-                if (!decremented) {
-                    return new StockReservationResult.InsufficientStock();
-                }
-                reservations.insert(reservation);
-                return new StockReservationResult.Success();
+            public StockReservationResult reserve(com.stockforge.inventory.domain.model.Reservation reservation) {
+                return new StockReservationResult.OptimisticConflict();
             }
         };
 
-        useCase =
-                new ReserveStockUseCase(products, strategy, reservations, idempotencyKeys, purchaseLimits, ids, clock);
+        assertThat(useCaseWith(alwaysConflicting).execute(new ReserveStockCommand("key-1", ALICE, product, 1)))
+                .isEqualTo(new ReserveStockResult.OptimisticConflict(product));
+        assertThat(fixture.purchaseLimits.heldBy(ALICE, product)).isZero();
 
-        Product product =
-                Product.create(PRODUCT_ID, Sku.of("TEST-SKU-1"), "Test Product", Money.of("29.99", "USD"), NOW);
-        products.insertIfSkuAvailable(product);
-        inventories.insert(Inventory.initial(PRODUCT_ID, 10, NOW));
+        // The retry is a fresh attempt, not a replay of the conflict.
+        assertThat(useCase.execute(new ReserveStockCommand("key-1", ALICE, product, 1)))
+                .isInstanceOfSatisfying(
+                        ReserveStockResult.Reserved.class,
+                        r -> assertThat(r.replayed()).isFalse());
     }
 
     @Test
-    void reservesStockSuccessfully() {
-        var command = new ReserveStockCommand("key-1", USER_ID, PRODUCT_ID, 2);
+    void unknownProductIsReportedAndNotStoredUnderTheKey() {
+        ProductId unknown = ProductId.of(UUID.randomUUID());
 
-        ReserveStockResult result = useCase.execute(command);
-
-        assertThat(result).isInstanceOf(ReserveStockResult.Reserved.class);
-        Reservation reservation = ((ReserveStockResult.Reserved) result).reservation();
-        assertThat(reservation.quantity()).isEqualTo(2);
-        assertThat(reservation.status()).isEqualTo(ReservationStatus.PENDING);
-        assertThat(inventories.findByProductId(PRODUCT_ID).orElseThrow().availableQuantity())
-                .isEqualTo(8);
-        assertThat(inventories.findByProductId(PRODUCT_ID).orElseThrow().reservedQuantity())
-                .isEqualTo(2);
+        assertThat(useCase.execute(new ReserveStockCommand("key-1", ALICE, unknown, 1)))
+                .isEqualTo(new ReserveStockResult.ProductNotFound(unknown));
+        assertThat(fixture.idempotencyKeys.findByKeyAndUser("key-1", ALICE)).isEmpty();
     }
 
     @Test
-    void replaysIdempotentlyWhenSameKeyAndPayload() {
-        var command = new ReserveStockCommand("key-1", USER_ID, PRODUCT_ID, 1);
-
-        ReserveStockResult first = useCase.execute(command);
-        assertThat(first).isInstanceOf(ReserveStockResult.Reserved.class);
-
-        ReserveStockResult replay = useCase.execute(command);
-        assertThat(replay).isInstanceOf(ReserveStockResult.IdempotentReplay.class);
-        assertThat(((ReserveStockResult.IdempotentReplay) replay).reservation().id())
-                .isEqualTo(((ReserveStockResult.Reserved) first).reservation().id());
-        // Available stock only decremented once
-        assertThat(inventories.findByProductId(PRODUCT_ID).orElseThrow().availableQuantity())
-                .isEqualTo(9);
+    void rejectsMalformedIdempotencyKeysAndQuantities() {
+        assertThatThrownBy(() -> new ReserveStockCommand("has space", ALICE, product, 1))
+                .isInstanceOf(DomainValidationException.class);
+        assertThatThrownBy(() -> new ReserveStockCommand("x".repeat(129), ALICE, product, 1))
+                .isInstanceOf(DomainValidationException.class);
+        assertThatThrownBy(() -> new ReserveStockCommand("key", ALICE, product, 0))
+                .isInstanceOf(DomainValidationException.class);
     }
 
-    @Test
-    void rejectsReusedKeyWithDifferentPayload() {
-        useCase.execute(new ReserveStockCommand("key-1", USER_ID, PRODUCT_ID, 1));
-
-        var differentCommand = new ReserveStockCommand("key-1", USER_ID, PRODUCT_ID, 2);
-        ReserveStockResult result = useCase.execute(differentCommand);
-
-        assertThat(result)
-                .isInstanceOf(ReserveStockResult.IdempotencyConflict.class)
-                .extracting("message")
-                .asString()
-                .contains("different request payload");
-    }
-
-    @Test
-    void rejectsWhenInsufficientStock() {
-        ProductId scarceProduct = ProductId.of(UUID.fromString("0192f5c4-1111-7777-8888-000000000000"));
-        products.insertIfSkuAvailable(
-                Product.create(scarceProduct, Sku.of("SCARCE-SKU"), "Scarce", Money.of("10.00", "USD"), NOW));
-        inventories.insert(Inventory.initial(scarceProduct, 1, NOW));
-
-        var command = new ReserveStockCommand("key-scarce", USER_ID, scarceProduct, 2);
-
-        ReserveStockResult result = useCase.execute(command);
-
-        assertThat(result).isInstanceOf(ReserveStockResult.InsufficientStock.class);
-        assertThat(reservations.count()).isZero();
-        assertThat(inventories.findByProductId(scarceProduct).orElseThrow().availableQuantity())
-                .isEqualTo(1);
-    }
-
-    @Test
-    void rejectsWhenPurchaseLimitExceeded() {
-        useCase.execute(new ReserveStockCommand("key-1", USER_ID, PRODUCT_ID, 2));
-
-        var command = new ReserveStockCommand("key-2", USER_ID, PRODUCT_ID, 1);
-        ReserveStockResult result = useCase.execute(command);
-
-        assertThat(result).isInstanceOf(ReserveStockResult.PurchaseLimitExceeded.class);
-    }
-
-    @Test
-    void rejectsWhenProductDoesNotExist() {
-        ProductId unknown = ProductId.of(UUID.fromString("0192f5c4-0000-7000-8000-000000000000"));
-        var command = new ReserveStockCommand("key-1", USER_ID, unknown, 1);
-
-        ReserveStockResult result = useCase.execute(command);
-
-        assertThat(result).isInstanceOf(ReserveStockResult.ProductNotFound.class);
+    private ReserveStockUseCase useCaseWith(StockReservationStrategy strategy) {
+        return new ReserveStockUseCase(
+                fixture.products,
+                strategy,
+                fixture.reservations,
+                fixture.idempotencyKeys,
+                fixture.purchaseLimits,
+                fixture.outbox,
+                fixture.ids,
+                fixture.clock,
+                InventoryFixture.POLICY);
     }
 }

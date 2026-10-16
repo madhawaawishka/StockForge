@@ -25,6 +25,7 @@ class HexagonalArchitectureTest {
             .applicationServices("..application..")
             .adapter("web", "..adapter.in.web..")
             .adapter("grpc", "..adapter.in.grpc..")
+            .adapter("kafka", "..adapter.in.kafka..")
             .adapter("scheduler", "..adapter.in.scheduler..")
             .adapter("persistence", "..adapter.out.persistence..")
             .adapter("cache", "..adapter.out.cache..")
@@ -70,7 +71,13 @@ class HexagonalArchitectureTest {
     static final ArchRule adaptersAreNotPublicApi = classes()
             .that()
             .resideInAnyPackage(
-                    "..adapter.in.web..", "..adapter.in.grpc..", "..adapter.out.persistence..", "..adapter.out.cache..")
+                    "..adapter.in.web..",
+                    "..adapter.in.grpc..",
+                    "..adapter.in.kafka..",
+                    "..adapter.in.scheduler..",
+                    "..adapter.out.persistence..",
+                    "..adapter.out.cache..",
+                    "..adapter.out.messaging..")
             .should()
             .notBePublic()
             .because("adapters are implementation details reached only through ports, HTTP, or gRPC");

@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package stockforge.order.v1;
+
+option java_multiple_files = true;
+option java_package = "com.stockforge.order.v1";
+
+// Internal gRPC contract of the Order Service, the checkout saga orchestrator (spec §12, §16).
+//
+// The error model and evolution rules are the same as in inventory_service.proto: business outcomes
+// are gRPC status codes and the problem type is sent in the "stockforge-problem-type" trailer.
+service OrderService {
+  // Creates the order for a PENDING reservation and starts the payment step of the saga.
+  // The call returns as soon as the order is stored; payment completes asynchronously.
+  rpc CreateOrder (CreateOrderRequest) returns (CreateOrderResponse);
+  rpc GetOrder (GetOrderRequest) returns (GetOrderResponse);
+  rpc ListOrders (ListOrdersRequest) returns (ListOrdersResponse);
+  // Republishes dead-lettered messages to their original topic (spec §22). Administrators only.
+  rpc ReplayDeadLetters (ReplayDeadLettersRequest) returns (ReplayDeadLettersResponse);
+}
+
+message Order {
+  string id = 1;
+  string user_id = 2;
+  string reservation_id = 3;
+  string status = 4;
+  string total_amount = 5;
+  string currency = 6;
+  repeated OrderItem items = 7;
+  repeated StatusChange history = 8;
+  string created_at = 9;
+  string updated_at = 10;
+}
+
+message OrderItem {
+  string product_id = 1;
+  int32 quantity = 2;
+  // Price snapshot taken when the order was created.
+  string unit_price = 3;
+  string currency = 4;
+}
+
+message StatusChange {
+  // Empty for the initial status.
+  string from_status = 1;
+  string to_status = 2;
+  string reason = 3;
+  string occurred_at = 4;
+}
+
+message CreateOrderRequest {
+  string reservation_id = 1;
+  // Authenticated caller; must own the reservation.
+  string user_id = 2;
+  string idempotency_key = 3;
+  // Optional simulated payment outcome (SUCCEEDED, FAILED, TIMED_OUT, NO_RESPONSE) for deterministic
+  // tests and demos (FR-6). Honoured only when payment simulation is enabled in that environment.
+  string payment_simulation = 4;
+}
+
+message CreateOrderResponse {
+  Order order = 1;
+  bool idempotent_replay = 2;
+}
+
+message GetOrderRequest {
+  string order_id = 1;
+  // Owner check (spec §28): another user's order is reported as NOT_FOUND.
+  // Empty only for privileged callers (administrators).
+  string requester_user_id = 2;
+}
+
+message GetOrderResponse {
+  Order order = 1;
+}
+
+message ListOrdersRequest {
+  string user_id = 1;
+  int32 limit = 2;
+  // Opaque keyset cursor from a previous response; empty for the first page.
+  string cursor = 3;
+}
+
+message ListOrdersResponse {
+  repeated Order orders = 1;
+  string next_cursor = 2;
+}
+
+message ReplayDeadLettersRequest {
+  // Original topic, for example "payment-events"; its dead-letter topic is "<topic>.DLT".
+  string topic = 1;
+  int32 max_messages = 2;
+  string actor_id = 3;
+}
+
+message ReplayDeadLettersResponse {
+  int32 replayed = 1;
+}

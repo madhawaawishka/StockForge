@@ -1,58 +1,36 @@
-# RUNBOOK-001: Stock Invariant Violation
+# RUNBOOK-001: Stock invariant violation
 
-## Severity: CRITICAL (P1 Incident)
+**Alert:** `StockInvariantViolation` — `stockforge_inventory_invariant_violations > 0` · **Severity:** critical (P1)
 
-## 1. Description
-The `StockInvariantViolation` alert fired because `stockforge_inventory_invariant_violations > 0`. This indicates that physical inventory stock conservation (`available_quantity + reserved_quantity + sold_quantity == total_physical_quantity`) was broken, or `available_quantity < 0` for one or more SKUs.
+## What it means
+The inventory service's reconciliation job (every minute, `REPEATABLE READ` snapshot) found rows where
+- `available + reserved + sold ≠ total`, or a counter is negative — *cannot* happen while the CHECK constraint exists,
+  so this indicates a dropped constraint or manual data change;
+- `reserved_quantity` differs from the sum of `PENDING` reservations — a reservation transition updated one but not
+  the other;
+- a user's purchase-limit counter differs from their pending + confirmed units (POSTMORTEM-005).
 
-## 2. Immediate Impact
-Potential overselling, revenue loss, and inventory corruption. Customers may have reserved or purchased items that do not exist in the physical warehouse.
+Overselling may have happened. Treat as an incident until proven otherwise.
 
-## 3. Immediate Mitigation Steps (Triage)
-1. **Identify the Corrupted SKU:**
-   Connect to the PostgreSQL database and run the diagnostic reconciliation query:
-   ```sql
-   SELECT product_id, sku, available_quantity, reserved_quantity, sold_quantity, total_physical_quantity,
-          (available_quantity + reserved_quantity + sold_quantity) AS calculated_total
-   FROM inventory.inventory
-   JOIN inventory.products USING (product_id)
-   WHERE (available_quantity + reserved_quantity + sold_quantity) != total_physical_quantity
-      OR available_quantity < 0;
-   ```
-2. **Halt Purchases on Affected SKU (Circuit Breaker):**
-   Temporarily deactivate the affected product to halt incoming reservations:
-   ```sql
-   UPDATE inventory.products SET status = 'INACTIVE' WHERE product_id = '<CORRUPTED_PRODUCT_ID>';
-   ```
-   Evict product and inventory caches from Redis:
-   ```bash
-   redis-cli DEL "stockforge:product:<CORRUPTED_PRODUCT_ID>"
-   redis-cli DEL "stockforge:inventory:<CORRUPTED_PRODUCT_ID>"
-   ```
-3. **Audit Active Reservations:**
-   Inspect active reservations for the product:
-   ```sql
-   SELECT reservation_id, user_id, quantity, status, expires_at
-   FROM inventory.reservations
-   WHERE product_id = '<CORRUPTED_PRODUCT_ID>' AND status = 'PENDING';
-   ```
+## Confirm
+```bash
+./scripts/verify-invariants.sh     # lists every violating row by check
+```
+```sql
+-- Which flows touched the product recently?
+SELECT action, aggregate_id, actor_id, created_at, metadata
+FROM inventory.audit_logs WHERE aggregate_id = '<product-id>' ORDER BY created_at DESC LIMIT 20;
+SELECT status, count(*), sum(quantity) FROM inventory.reservations
+WHERE product_id = '<product-id>' GROUP BY status;
+```
 
-## 4. Root Cause Analysis
-- Check if manual database modifications bypassed the application layer.
-- Verify whether an unhandled race condition occurred in `AtomicConditionalUpdateReservationStrategy`.
-- Review audit logs in `inventory_audit_log` around the violation timestamp.
+## Mitigate
+1. **Stop selling the product** if `available` may be wrong: adjust its available stock to zero through the admin
+   API (`POST /api/v1/admin/products/{id}/stock-adjustments`, audited). Do not edit rows by hand.
+2. If the reserved counter drifted, find the reservation transition that skipped it (logs by `reservationId`, trace in
+   Tempo) before correcting anything.
+3. Correct the counter with a stock adjustment that states the reason; the adjustment is audited and idempotent.
 
-## 5. Recovery & Rollback
-1. Correct the stock counts in `inventory.inventory` to match physical truth.
-2. If excess pending reservations exist, cancel them before expiry:
-   ```sql
-   UPDATE inventory.reservations SET status = 'CANCELLED' WHERE reservation_id = '<EXCESS_RESERVATION_ID>';
-   ```
-3. Re-enable product:
-   ```sql
-   UPDATE inventory.products SET status = 'ACTIVE' WHERE product_id = '<CORRUPTED_PRODUCT_ID>';
-   ```
-4. Verify reconciliation gauge reset:
-   ```sql
-   SELECT stockforge_inventory_invariant_violations;
-   ```
+## Follow-up
+Write a postmortem. Add the failing scenario as a test in `ReservationLifecycleTest` or the concurrency suite —
+every invariant must be enforced in the domain, the database and a test (CLAUDE.md).

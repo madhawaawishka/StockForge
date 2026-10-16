@@ -1,41 +1,57 @@
-# Notification Worker application configuration (spec §10, §18)
+# Notification worker: simulated customer notifications from order events (spec §10, FR-9).
 spring:
   application:
     name: notification-worker
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
   datasource:
-    url: ${NOTIFICATION_DB_URL:jdbc:postgresql://localhost:5432/stockforge}
-    username: ${NOTIFICATION_DB_USERNAME:notification_svc}
-    password: ${NOTIFICATION_DB_PASSWORD:notification_local_only}
+    url: ${NOTIFICATION_DB_URL}
+    username: ${NOTIFICATION_DB_USERNAME}
+    password: ${NOTIFICATION_DB_PASSWORD}
     hikari:
       pool-name: notification-db
       maximum-pool-size: ${NOTIFICATION_DB_POOL_SIZE:5}
       minimum-idle: ${NOTIFICATION_DB_POOL_SIZE:5}
-      connection-timeout: 3000
+      connection-timeout: ${NOTIFICATION_DB_CONNECTION_TIMEOUT:1000}
       schema: notification
       data-source-properties:
         options: "-c statement_timeout=5000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=10000"
+        socketTimeout: 10
   flyway:
     schemas: notification
     default-schema: notification
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
-    consumer:
-      group-id: notification-service-group
-      auto-offset-reset: earliest
-      enable-auto-commit: false
     producer:
+      # Only the dead-letter publisher produces here.
       acks: all
-      retries: 3
+      properties:
+        enable.idempotence: true
+        max.block.ms: 2000
+        delivery.timeout.ms: 10000
+        request.timeout.ms: 5000
+    consumer:
+      auto-offset-reset: earliest
+      properties:
+        enable.auto.commit: false
     listener:
+      ack-mode: record
       observation-enabled: true
     template:
       observation-enabled: true
-  jackson:
-    deserialization:
-      fail-on-unknown-properties: true
 
 server:
   port: ${NOTIFICATION_HTTP_PORT:8084}
+  shutdown: graceful
+
+stockforge:
+  messaging:
+    outbox:
+      # The worker publishes no events, so it has no outbox to relay.
+      relay-enabled: false
+    topics:
+      declare: order-events
+      dead-letters: order-events
 
 management:
   endpoints:
@@ -52,9 +68,19 @@ management:
   tracing:
     sampling:
       probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
-  otlp:
+  opentelemetry:
     tracing:
-      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318/v1/traces}
+      export:
+        otlp:
+          endpoint: ${OTEL_TRACES_ENDPOINT:http://localhost:4318/v1/traces}
+  otlp:
+    metrics:
+      export:
+        enabled: false
+  logging:
+    export:
+      otlp:
+        enabled: false
   info:
     build:
       enabled: true

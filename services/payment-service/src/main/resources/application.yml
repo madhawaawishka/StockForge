@@ -1,32 +1,42 @@
-# Payment Service application configuration (spec §10, §16, §24)
+# Payment service: simulated payments with controllable outcomes (spec §10, FR-6). Environment-specific values come
+# from environment variables; required ones have no default.
 spring:
   application:
     name: payment-service
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
   datasource:
-    url: ${PAYMENT_DB_URL:jdbc:postgresql://localhost:5432/stockforge}
-    username: ${PAYMENT_DB_USERNAME:payment_svc}
-    password: ${PAYMENT_DB_PASSWORD:payment_local_only}
+    url: ${PAYMENT_DB_URL}
+    username: ${PAYMENT_DB_USERNAME}
+    password: ${PAYMENT_DB_PASSWORD}
     hikari:
       pool-name: payment-db
       maximum-pool-size: ${PAYMENT_DB_POOL_SIZE:10}
       minimum-idle: ${PAYMENT_DB_POOL_SIZE:10}
-      connection-timeout: 3000
+      connection-timeout: ${PAYMENT_DB_CONNECTION_TIMEOUT:1000}
       schema: payment
       data-source-properties:
         options: "-c statement_timeout=5000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=10000"
+        socketTimeout: 10
   flyway:
     schemas: payment
     default-schema: payment
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
-    consumer:
-      group-id: payment-service-group
-      auto-offset-reset: earliest
-      enable-auto-commit: false
     producer:
       acks: all
-      retries: 3
+      properties:
+        enable.idempotence: true
+        max.block.ms: 2000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+        linger.ms: 5
+    consumer:
+      auto-offset-reset: earliest
+      properties:
+        enable.auto.commit: false
     listener:
+      ack-mode: record
       observation-enabled: true
     template:
       observation-enabled: true
@@ -36,6 +46,21 @@ spring:
 
 server:
   port: ${PAYMENT_HTTP_PORT:8083}
+  shutdown: graceful
+
+payment:
+  simulation:
+    # Off by default: only test and demo environments let a request choose its payment outcome (FR-6).
+    allow-requested-outcome: ${PAYMENT_SIMULATION_CONTROL:false}
+    default-outcome: ${PAYMENT_DEFAULT_OUTCOME:SUCCEEDED}
+    latency: ${PAYMENT_SIMULATED_LATENCY:20ms}
+    timeout: ${PAYMENT_TIMEOUT:2s}
+
+stockforge:
+  messaging:
+    topics:
+      declare: payment-events,payment-commands
+      dead-letters: payment-commands
 
 management:
   endpoints:
@@ -52,9 +77,19 @@ management:
   tracing:
     sampling:
       probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
-  otlp:
+  opentelemetry:
     tracing:
-      endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318/v1/traces}
+      export:
+        otlp:
+          endpoint: ${OTEL_TRACES_ENDPOINT:http://localhost:4318/v1/traces}
+  otlp:
+    metrics:
+      export:
+        enabled: false
+  logging:
+    export:
+      otlp:
+        enabled: false
   info:
     build:
       enabled: true

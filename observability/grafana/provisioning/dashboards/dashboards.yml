@@ -1,12 +1,14 @@
+# Mounted into grafana/otel-lgtm at /otel-lgtm/grafana/conf/provisioning/dashboards/stockforge.yaml.
+# Dashboards query the image's bundled data sources by uid (prometheus, tempo, loki), so none are provisioned here.
 apiVersion: 1
 
 providers:
-  - name: 'StockForge Dashboards'
+  - name: StockForge
     orgId: 1
-    folder: 'StockForge'
+    folder: StockForge
     type: file
-    disableDeletion: false
-    updateIntervalSeconds: 10
-    allowUiUpdates: true
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
     options:
-      path: /var/lib/grafana/dashboards
+      path: /otel-lgtm/stockforge-dashboards

@@ -1,93 +1,64 @@
-# Benchmark Report: Inventory Reservation Concurrency Strategies
+# Reservation concurrency strategies under a flash sale
 
-Comprehensive benchmark and comparative analysis of concurrency control strategies for inventory reservation under high contention (spec §14, §26).
+**Question.** Which strategy should protect the hot inventory row: an atomic conditional `UPDATE`, a pessimistic
+`SELECT … FOR UPDATE`, or optimistic locking with a version column (spec §14, ADR-006)?
 
----
+**Answer.** The atomic conditional update. All three sold exactly 500 of 500 units — none oversold — but only the atomic
+update did it without errors. The other two held database connections while waiting (for a row lock, or between
+retries), exhausted the 10-connection pool, and pushed the gateway's circuit breaker open. Optimistic locking also
+**undersold**: it turned buyers away while 35–39 units were still in stock.
 
-## 1. Environment Specification
+Environment and method: [README.md](README.md). Each strategy ran on a warmed-up stack: 500 units, 5,000 buyers at
+500 req/s, every buyer a new user.
 
-- **Hardware:** Intel Core i7 / AMD Ryzen 8-core CPU, 32GB RAM, NVMe SSD
-- **OS:** Windows 11 / WSL2 Linux
-- **JVM:** OpenJDK 23 (target bytecode: Java 21 LTS)
-- **Database:** PostgreSQL 18.6 (Docker, shared instance, 10 connections pool, `statement_timeout=5000`, `lock_timeout=2000`)
-- **Load Tool:** k6 v0.50+ / Testcontainers multithreaded latch harness (`StockReservationConcurrencyIT`)
+## Results
+| Strategy | Run | Sold | Sold out (409) | Unexpected | Reserved P50 / P95 / P99 | Sold-out P50 / P99 |
+| :--- | :---: | ---: | ---: | ---: | :--- | :--- |
+| **Atomic conditional update** | 1 | 500 | 3,779 | 722 | 881 / 1,079 / 1,152 ms | 5 / 933 ms |
+| | 2 | 500 | 4,501 | **0** | 156 / 219 / 254 ms | 5 / 114 ms |
+| | 3 | 500 | 4,500 | **0** | 132 / 190 / 230 ms | 5 / 91 ms |
+| **Pessimistic locking** | 1 | 500 | 231 | 4,270 | 600 / 1,061 / 1,207 ms | 951 / 1,105 ms |
+| | 2 | 500 | 1,334 | 3,167 | 825 / 1,102 / 1,222 ms | 174 / 947 ms |
+| | 3 | 500 | 4,374 | 127 | 259 / 624 / 686 ms | 13 / 647 ms |
+| **Optimistic locking** (5 retries) | 1 | **461** | 0 | 4,540 | 947 / 1,113 / 1,182 ms | — |
+| | 2 | — | — | — | setup failed: the breaker was still open from run 1 | — |
+| | 3 | **465** | 0 | 4,536 | 912 / 1,114 / 1,149 ms | — |
 
----
+"Unexpected" responses were `503 service-unavailable`. Atomic run 1 still carried JIT warm-up (the inventory service
+had just been recreated); runs 2 and 3 are representative. After all runs, `scripts/verify-invariants.sh` found no
+violation for any strategy.
 
-## 2. Evaluated Strategies
+## Why — what the metrics showed
+| Signal (Prometheus, during the measured runs) | Atomic | Pessimistic | Optimistic |
+| :--- | ---: | ---: | ---: |
+| Inventory requests waiting for a DB connection (max) | **0** | 92 | 191 |
+| Calls rejected by the gateway's open circuit breaker | 0 | 1,966 | 13,542 |
+| Transactions that could not get a connection (`CannotCreateTransactionException`) | 0 | — | 684 |
 
-1. **Atomic Conditional Update (`ATOMIC_CONDITIONAL_UPDATE`) [Production Default]:**
-   - Single SQL statement:
-     ```sql
-     UPDATE inventory.inventory
-     SET available_quantity = available_quantity - :qty,
-         reserved_quantity = reserved_quantity + :qty,
-         version = version + 1,
-         updated_at = :now
-     WHERE product_id = :id AND available_quantity >= :qty;
-     ```
-   - Zero application-level retries; single database round trip; row lock acquired only for the duration of the single statement execution.
+- **Atomic conditional update** — `UPDATE inventory SET available = available - :q … WHERE product_id = :id AND
+  available >= :q` checks and decrements in one statement (0.25 ms in [query-plans.md](query-plans.md)). Concurrent
+  transactions queue on the row lock inside PostgreSQL for the shortest possible time; once stock reaches zero the
+  predicate fails without waiting and the answer is an immediate 409.
+- **Pessimistic locking** — `SELECT … FOR UPDATE`, decide in Java, then `UPDATE`. The lock is held for two round trips
+  plus application code, and every waiting transaction holds a pool connection while it waits. At 500 req/s the
+  pool's ten connections were all parked behind one row lock; new requests waited up to 1 s for a connection, then
+  failed with 503.
+- **Optimistic locking** — read the version, `UPDATE … WHERE version = :v`, retry with backoff on conflict. On one hot
+  row almost every attempt conflicts. The retries (up to 5) happen inside the open transaction and sleep between
+  attempts, so each request holds its connection longer the more it conflicts and the pool starves even faster; requests that ran out of retries or connections were rejected even though stock remained — the
+  undersell. Optimistic locking suits rows that are rarely contended, which is exactly what a flash sale is not.
 
-2. **Pessimistic Locking (`PESSIMISTIC_LOCKING`):**
-   - Two-step transaction:
-     ```sql
-     SELECT available_quantity, reserved_quantity, version
-     FROM inventory.inventory
-     WHERE product_id = :id FOR UPDATE;
-     ```
-     Followed by application stock validation and `UPDATE inventory.inventory ...`.
-   - Explicit exclusive row-level lock held across the entire transaction boundary until commit.
+## Unit-level evidence
+`StockReservationConcurrencyIT` (part of `./mvnw verify`) runs 400 attempts from 32 threads against 100 units, each in
+its own transaction released by a latch, three times per strategy: atomic and pessimistic sell exactly 100 and reject
+300; optimistic never oversells but may sell fewer; the naive read-modify-write (test-only) oversells on every run.
 
-3. **Optimistic Locking (`OPTIMISTIC_LOCKING`):**
-   - Read uncommitted state with version:
-     ```sql
-     SELECT available_quantity, reserved_quantity, version
-     FROM inventory.inventory WHERE product_id = :id;
-     ```
-     Followed by conditional CAS update:
-     ```sql
-     UPDATE inventory.inventory ... WHERE product_id = :id AND version = :version;
-     ```
-   - If 0 rows updated, retry with exponential backoff and jitter up to 5 attempts.
+## Decision
+Keep `ATOMIC_CONDITIONAL_UPDATE` as the default (ADR-006). The other strategies stay selectable
+(`INVENTORY_RESERVATION_STRATEGY`) for comparison; the naive one requires an explicit unsafe flag.
 
-4. **Naive Read-Then-Write (`NAIVE`):**
-   - Read stock, validate in Java application memory, execute unconditional `UPDATE`.
-   - Used as control benchmark to mathematically prove the lost-update race condition.
-
----
-
-## 3. Comparative Benchmark Results
-
-### Flash Sale Scenario: Single Hot SKU (100 Physical Units, 2,000 Concurrent Callers)
-
-| Strategy | Throughput (req/s) | P50 (ms) | P95 (ms) | P99 (ms) | Avg Retries | Oversold Units | Invariant Violations |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Atomic Conditional Update** | **2,450** | **8.2** | **22.4** | **38.1** | **0** | **0** | **0** |
-| **Pessimistic (`FOR UPDATE`)** | **1,120** | **17.5** | **58.2** | **94.6** | **0** | **0** | **0** |
-| **Optimistic Locking** | **680** | **24.1** | **112.5** | **185.0** | **4.2** | **0** | **0** |
-| **Naive (Lost Update)** | 2,810 | 6.1 | 18.0 | 29.5 | 0 | **+84 (Oversold!)** | **FAIL** |
-
----
-
-## 4. Deep-Dive Strategy Analysis
-
-### A. Atomic Conditional Update (Winner)
-- **Why it wins:** PostgreSQL evaluates the `WHERE available_quantity >= :qty` condition atomically at row update time inside the engine's tuple lock. If stock is exhausted, the update returns `rows_affected == 0` in sub-millisecond time without blocking subsequent transactions.
-- **Connection Efficiency:** Minimal lock hold duration (single query vs full multi-statement transaction) prevents HikariCP pool starvation.
-- **SLO-1 Compliance:** P99 of 38.1ms comfortably satisfies SLO-1 (<50ms).
-
-### B. Pessimistic Locking
-- **Lock Queue Serialization:** Under 2,000 concurrent threads, 1,999 transactions queue on the single row lock in PostgreSQL.
-- **Tail Latency Blowout:** Although zero items are oversold, P99 latency stretches to 94.6ms, breaching SLO-1. Furthermore, long lock hold times risk triggering `lock_timeout` (2000ms) under heavy load.
-
-### C. Optimistic Locking
-- **The Contention Trap:** In a flash sale where 2,000 threads attempt to write to the same version, exactly 1 succeeds and 1,999 fail.
-- **Retry Storm:** 1,999 threads sleep with jitter and retry, re-reading the version and colliding again. By iteration 3, database CPU reaches 100% saturation on useless rollbacks and retries, while throughput drops to 680 req/s. Optimistic locking is fundamentally unsuitable for hot-spot contention.
-
-### D. Naive Strategy
-- **Demonstration of Vulnerability:** Without database-level isolation, concurrent threads read `available_quantity = 100` before any thread commits an update. 184 reservations are created for only 100 physical items. This proves why architectural enforcement is mandatory.
-
----
-
-## 5. Architectural Decision
-As ratified in `ADR-006`, StockForge mandates **Atomic Conditional Update** across all inventory reservation pathways.
+Reproduce one strategy:
+```bash
+INVENTORY_RESERVATION_STRATEGY=PESSIMISTIC_LOCKING docker compose --profile apps up -d --wait inventory-service
+# warm up, then run load-tests/reservation-contention.js as in README.md
+```

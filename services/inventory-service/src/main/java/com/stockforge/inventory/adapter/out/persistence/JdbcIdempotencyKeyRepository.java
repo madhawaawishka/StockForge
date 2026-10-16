@@ -67,12 +67,23 @@ class JdbcIdempotencyKeyRepository implements IdempotencyKeyRepository {
     }
 
     @Override
-    public void fail(String key, UserId userId) {
-        jdbc.sql("""
-                        UPDATE idempotency_keys
-                        SET status = 'FAILED'
-                        WHERE key = :key AND user_id = :userId
-                        """).param("key", key).param("userId", userId.value()).update();
+    public void release(String key, UserId userId) {
+        jdbc.sql("DELETE FROM idempotency_keys WHERE key = :key AND user_id = :userId")
+                .param("key", key)
+                .param("userId", userId.value())
+                .update();
+    }
+
+    @Override
+    public int deleteExpired(Instant now, int batchSize) {
+        return jdbc.sql("""
+                        DELETE FROM idempotency_keys
+                        WHERE (user_id, key) IN (SELECT user_id, key FROM idempotency_keys
+                                                 WHERE expires_at < :now LIMIT :batch)
+                        """)
+                .param("now", toTimestamp(now))
+                .param("batch", batchSize)
+                .update();
     }
 
     private static IdempotencyRecord mapRow(ResultSet rs, int rowNum) throws SQLException {

@@ -133,7 +133,7 @@ class ProductApiIT {
                 .expectBody()
                 .jsonPath("$.type")
                 .isEqualTo(PROBLEM_TYPE_BASE + "validation-failed")
-                .jsonPath("$.errors[0].field")
+                .jsonPath("$.violations[0].field")
                 .isEqualTo("sku");
     }
 

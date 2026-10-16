@@ -106,7 +106,7 @@ class JdbcInventoryRepository implements InventoryRepository {
     }
 
     @Override
-    public void updateUnconditional(ProductId productId, int newAvailable, int newReserved, Instant now) {
+    public void overwriteAvailableAndReserved(ProductId productId, int newAvailable, int newReserved, Instant now) {
         jdbc.sql("""
                         UPDATE inventory
                         SET available_quantity = :available,
@@ -155,6 +155,27 @@ class JdbcInventoryRepository implements InventoryRepository {
                 .param("updatedAt", toTimestamp(now))
                 .update();
         return rows == 1;
+    }
+
+    @Override
+    public Optional<Inventory> adjustStock(ProductId productId, int delta, Instant now) {
+        // One conditional statement: concurrent reservations cannot interleave with the check.
+        return jdbc.sql("""
+                        UPDATE inventory
+                        SET total_quantity     = total_quantity + :delta,
+                            available_quantity = available_quantity + :delta,
+                            version            = version + 1,
+                            updated_at         = :updatedAt
+                        WHERE product_id = :productId
+                          AND available_quantity + :delta >= 0
+                        RETURNING product_id, total_quantity, available_quantity, reserved_quantity, sold_quantity,
+                                  version, updated_at
+                        """)
+                .param("productId", productId.value())
+                .param("delta", delta)
+                .param("updatedAt", toTimestamp(now))
+                .query(JdbcInventoryRepository::mapRow)
+                .optional();
     }
 
     private static Inventory mapRow(ResultSet rs, int rowNum) throws SQLException {

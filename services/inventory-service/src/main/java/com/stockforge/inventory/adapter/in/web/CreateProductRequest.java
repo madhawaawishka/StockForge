@@ -31,7 +31,10 @@ record CreateProductRequest(
 
     static final int MAX_INITIAL_STOCK = 1_000_000;
 
+    /** Audit actor of the internal API; through the gateway the administrator's user id is recorded instead. */
+    static final String INTERNAL_ACTOR = "inventory-internal-api";
+
     CreateProductCommand toCommand() {
-        return new CreateProductCommand(Sku.of(sku), name, price.toMoney(), initialStock);
+        return new CreateProductCommand(Sku.of(sku), name, price.toMoney(), initialStock, INTERNAL_ACTOR);
     }
 }

@@ -25,3 +25,14 @@ Adopt **Atomic Conditional Update** as the default production strategy (`@Primar
   - `PessimisticLockingReservationStrategy`: exactly 10 units reserved, 0 oversold, stock conservation holds.
   - `OptimisticLockingReservationStrategy`: ≤ 10 units reserved, 0 oversold, stock conservation holds.
   - `NaiveReservationStrategy`: > 5 units reserved for 5 physical units, explicitly proving overselling.
+
+## Addendum — 2026-10-13 (audit before Week 6)
+The decision stands; two details above no longer describe the code and are corrected here rather than rewritten:
+- Strategies are no longer Spring components with `@Primary`. `ReservationStrategyConfiguration` creates exactly one,
+  chosen by `inventory.reservation.strategy` (default `ATOMIC_CONDITIONAL_UPDATE`). The naive strategy can only be
+  selected together with `inventory.reservation.allow-unsafe-strategy=true`, so it cannot reach production by accident.
+- `StockReservationConcurrencyIT` now runs 400 attempts from 32 concurrent clients against 100 units, each attempt in
+  its own transaction released by a latch, repeated 3 times per strategy. Atomic and pessimistic sell exactly 100 and
+  reject exactly 300; optimistic never oversells but may give up after 5 retries; naive (50 attempts on 5 units)
+  accepts more than 5. End-to-end numbers through the gateway are in
+  [docs/benchmarks/concurrency-strategies.md](../benchmarks/concurrency-strategies.md).

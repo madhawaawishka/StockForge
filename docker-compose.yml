@@ -1,10 +1,45 @@
-# Local infrastructure for StockForge. Start with `docker compose up -d`; services run on the host
-# (`./mvnw ... spring-boot:run -Dspring-boot.run.profiles=local`) and connect via localhost.
+# StockForge local stack (spec §30, §33).
 #
-# All credentials below exist only in this local stack and are not secrets.
+#   docker compose up -d                          infrastructure only; run services on the host with the local profile
+#   docker compose --profile apps up -d --build   the whole system in containers; the API is at http://localhost:8080
+#   docker compose --profile tools up -d          adds Kafka UI at http://localhost:8090
+#
+# All credentials below exist only in this local stack and are not secrets (CLAUDE.md). Real environments inject them
+# from a secret store (see infra/terraform).
 name: stockforge
 
+# Shared settings for the five Spring Boot services.
+x-service: &service
+  profiles: ["apps"]
+  restart: unless-stopped
+  # Hardened runtime: immutable filesystem (Tomcat only needs /tmp), no privilege escalation, no Linux capabilities.
+  read_only: true
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  # SIGTERM starts Spring's graceful shutdown, which waits up to 20 s per phase (spring.lifecycle); give it room
+  # before Docker escalates to SIGKILL.
+  stop_grace_period: 30s
+  # Two CPUs per JVM: with one, the virtual-thread scheduler gets a single carrier thread and the JIT compiler competes
+  # with request processing for it (measured: docs/benchmarks/README.md).
+  deploy:
+    resources:
+      limits:
+        memory: 768m
+        cpus: "2.0"
+
+x-service-env: &service-env
+  KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+  REDIS_HOST: redis
+  OTEL_TRACES_ENDPOINT: http://observability:4318/v1/traces
+
 services:
+  # -------------------------------------------------------------------------------------------------------------
+  # Infrastructure (always started)
+  # -------------------------------------------------------------------------------------------------------------
   postgres:
     image: postgres:18.6
     command:
@@ -64,7 +99,8 @@ services:
       KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      # Topics are created explicitly with chosen partition counts, never by accident (spec §18).
+      # Topics are created explicitly with chosen partition counts, never by accident (spec §18). Each service
+      # declares the topics it owns at startup (stockforge.messaging.topics.declare).
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
     healthcheck:
@@ -74,24 +110,180 @@ services:
       retries: 15
       start_period: 20s
 
+  # Grafana, Prometheus, Tempo, Loki and an OpenTelemetry collector in one container (local use only).
   observability:
     image: grafana/otel-lgtm:0.8.1
     ports:
-      - "3000:3000"   # Grafana
-      - "4317:4317"   # OTLP gRPC
-      - "4318:4318"   # OTLP HTTP
-      - "9090:9090"   # Prometheus
-      - "3100:3100"   # Loki
-      - "3200:3200"   # Tempo
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
+      - "3000:3000" # Grafana (anonymous admin: local only)
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+      - "9090:9090" # Prometheus
+    # Lets Prometheus scrape services that run on the host (spring-boot:run) on Linux too.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
+      # Paths inside the image are /otel-lgtm/*; mounting elsewhere is silently ignored.
       - ./observability/prometheus/prometheus.yml:/otel-lgtm/prometheus.yaml:ro
-      - ./observability/prometheus/alert_rules.yml:/otel-lgtm/alert_rules.yaml:ro
-      - ./observability/grafana/provisioning/datasources:/otel-lgtm/grafana-provisioning/datasources:ro
-      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./observability/prometheus/alert_rules.yml:/otel-lgtm/alert_rules.yml:ro
+      - ./observability/grafana/provisioning/dashboards/dashboards.yml:/otel-lgtm/grafana/conf/provisioning/dashboards/stockforge.yaml:ro
+      - ./observability/grafana/dashboards:/otel-lgtm/stockforge-dashboards:ro
+
+  # -------------------------------------------------------------------------------------------------------------
+  # Services (profile "apps"). Only the gateway is published to the host: it is the system's single public entry
+  # point (spec §10); the other services are reachable only on the compose network.
+  # -------------------------------------------------------------------------------------------------------------
+  inventory-service:
+    <<: *service
+    build:
+      context: .
+      args:
+        SERVICE: inventory-service
+    image: stockforge/inventory-service:local
+    environment:
+      <<: *service-env
+      INVENTORY_DB_URL: jdbc:postgresql://postgres:5432/stockforge
+      INVENTORY_DB_USERNAME: inventory_svc
+      INVENTORY_DB_PASSWORD: inventory_local_only
+      INVENTORY_RESERVATION_STRATEGY: ${INVENTORY_RESERVATION_STRATEGY:-ATOMIC_CONDITIONAL_UPDATE}
+      INVENTORY_VIRTUAL_THREADS: ${INVENTORY_VIRTUAL_THREADS:-false}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/actuator/health/readiness"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  order-service:
+    <<: *service
+    build:
+      context: .
+      args:
+        SERVICE: order-service
+    image: stockforge/order-service:local
+    environment:
+      <<: *service-env
+      ORDER_DB_URL: jdbc:postgresql://postgres:5432/stockforge
+      ORDER_DB_USERNAME: order_svc
+      ORDER_DB_PASSWORD: order_local_only
+      INVENTORY_GRPC_TARGET: static://inventory-service:9091
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8082/actuator/health/readiness"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+
+  payment-service:
+    <<: *service
+    build:
+      context: .
+      args:
+        SERVICE: payment-service
+    image: stockforge/payment-service:local
+    environment:
+      <<: *service-env
+      PAYMENT_DB_URL: jdbc:postgresql://postgres:5432/stockforge
+      PAYMENT_DB_USERNAME: payment_svc
+      PAYMENT_DB_PASSWORD: payment_local_only
+      # Demo control: the X-Payment-Simulation header at the gateway picks the outcome per order.
+      PAYMENT_SIMULATION_CONTROL: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8083/actuator/health/readiness"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  notification-worker:
+    <<: *service
+    build:
+      context: .
+      args:
+        SERVICE: notification-worker
+    image: stockforge/notification-worker:local
+    environment:
+      <<: *service-env
+      NOTIFICATION_DB_URL: jdbc:postgresql://postgres:5432/stockforge
+      NOTIFICATION_DB_USERNAME: notification_svc
+      NOTIFICATION_DB_PASSWORD: notification_local_only
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8084/actuator/health/readiness"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  api-gateway:
+    <<: *service
+    build:
+      context: .
+      args:
+        SERVICE: api-gateway
+    image: stockforge/api-gateway:local
+    ports:
+      # Override when 8080 is taken on the host (on Windows, HTTP.sys often holds it): GATEWAY_PUBLIC_PORT=8088.
+      - "${GATEWAY_PUBLIC_PORT:-8080}:8080"
+    environment:
+      <<: *service-env
+      INVENTORY_GRPC_TARGET: static://inventory-service:9091
+      ORDER_GRPC_TARGET: static://order-service:9092
+      # Local-only HMAC key, identical to application-local.yml and load-tests/lib/auth.js (not a secret).
+      GATEWAY_JWT_SECRET: stockforge-local-development-only-hmac-key
+      GATEWAY_PAYMENT_SIMULATION: "true"
+      GATEWAY_API_DOCS_ENABLED: "true"
+      GATEWAY_VIRTUAL_THREADS: ${GATEWAY_VIRTUAL_THREADS:-true}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8180/actuator/health/readiness"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    depends_on:
+      redis:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+      order-service:
+        condition: service_healthy
+
+  # -------------------------------------------------------------------------------------------------------------
+  # Tools (profile "tools")
+  # -------------------------------------------------------------------------------------------------------------
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.3.0
+    profiles: ["tools"]
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: stockforge
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:19092
+    depends_on:
+      kafka:
+        condition: service_healthy
 
 volumes:
   postgres-data:
-

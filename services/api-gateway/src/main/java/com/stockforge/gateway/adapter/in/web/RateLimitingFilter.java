@@ -1,78 +1,83 @@
 package com.stockforge.gateway.adapter.in.web;
 
-import com.stockforge.gateway.domain.model.RateLimitResult;
 import com.stockforge.gateway.domain.port.RateLimiter;
+import io.micrometer.tracing.Tracer;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.security.Principal;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
-import org.springframework.stereotype.Component;
+import org.springframework.http.ProblemDetail;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.filter.OncePerRequestFilter;
+import tools.jackson.databind.json.JsonMapper;
 
-/** Gateway filter applying token-bucket rate limiting to mutating operations (spec §23 C). */
-@Component
-public class RateLimitingFilter extends OncePerRequestFilter {
+/**
+ * Per-user rate limits on the write endpoints (spec §23 C), applied after authentication so the bucket is keyed by the
+ * token's subject rather than a spoofable address. Rejections are 429 + Retry-After ("you are sending too much"),
+ * distinct from 503 + Retry-After ("the system is saturated", spec §23 D).
+ */
+final class RateLimitingFilter extends OncePerRequestFilter {
 
     private final RateLimiter rateLimiter;
+    private final JsonMapper json;
+    private final Tracer tracer;
 
-    public RateLimitingFilter(RateLimiter rateLimiter) {
+    RateLimitingFilter(RateLimiter rateLimiter, JsonMapper json, Tracer tracer) {
         this.rateLimiter = rateLimiter;
+        this.json = json;
+        this.tracer = tracer;
     }
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        String method = request.getMethod();
-        String uri = request.getRequestURI();
-        // Rate limit mutating endpoints
-        if (!"POST".equalsIgnoreCase(method)) {
-            return true;
-        }
-        return !(uri.startsWith("/api/v1/reservations") || uri.startsWith("/api/v1/orders"));
+        return policyOf(request) == null;
     }
 
     @Override
-    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
-
-        String key = resolveRateLimitKey(request);
-        RateLimitResult decision = rateLimiter.tryAcquire(key, 1);
-
-        if (!decision.allowed()) {
-            response.setStatus(429);
-            response.setHeader("Retry-After", String.valueOf(decision.retryAfterSeconds()));
-            response.setContentType(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
-            String problemJson = String.format("""
-                    {
-                      "type": "https://github.com/madhawaawishka/StockForge/blob/main/docs/api/problems.md#rate-limit-exceeded",
-                      "title": "Too Many Requests",
-                      "status": 429,
-                      "detail": "Rate limit exceeded. Please retry after %d seconds.",
-                      "instance": "%s"
-                    }
-                    """, decision.retryAfterSeconds(), request.getRequestURI());
-            response.getWriter().write(problemJson);
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || !authentication.isAuthenticated()) {
+            chain.doFilter(request, response); // the security chain answers 401
             return;
         }
-
-        response.setHeader("X-RateLimit-Remaining", String.valueOf(decision.remainingTokens()));
-        filterChain.doFilter(request, response);
+        RateLimiter.Decision decision = rateLimiter.tryAcquire(policyOf(request), authentication.getName());
+        if (decision.allowed()) {
+            response.setHeader("X-RateLimit-Remaining", String.valueOf(decision.remaining()));
+            chain.doFilter(request, response);
+            return;
+        }
+        ProblemDetail problem = Problems.problem(
+                HttpStatus.TOO_MANY_REQUESTS,
+                "rate-limit-exceeded",
+                "Rate limit exceeded",
+                "Too many requests; retry after " + decision.retryAfterSeconds() + " seconds",
+                request.getRequestURI(),
+                tracer);
+        response.setStatus(HttpStatus.TOO_MANY_REQUESTS.value());
+        response.setHeader(HttpHeaders.RETRY_AFTER, String.valueOf(decision.retryAfterSeconds()));
+        response.setContentType(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
+        response.setCharacterEncoding("UTF-8");
+        response.getWriter().write(json.writeValueAsString(problem));
     }
 
-    private static String resolveRateLimitKey(HttpServletRequest request) {
-        Principal principal = request.getUserPrincipal();
-        if (principal != null
-                && principal.getName() != null
-                && !principal.getName().isBlank()) {
-            return "user:" + principal.getName();
+    /** Only the expensive, side-effecting endpoints are limited; reads are protected by caching. */
+    private static String policyOf(HttpServletRequest request) {
+        if (!"POST".equals(request.getMethod())) {
+            return null;
         }
-        String forwarded = request.getHeader("X-Forwarded-For");
-        if (forwarded != null && !forwarded.isBlank()) {
-            int commaIdx = forwarded.indexOf(',');
-            return "ip:" + (commaIdx > 0 ? forwarded.substring(0, commaIdx).trim() : forwarded.trim());
+        String path = request.getRequestURI();
+        if (path.equals("/api/v1/reservations")) {
+            return "reservations";
         }
-        return "ip:" + request.getRemoteAddr();
+        if (path.equals("/api/v1/orders")) {
+            return "orders";
+        }
+        return null;
     }
 }

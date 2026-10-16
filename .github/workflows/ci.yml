@@ -17,7 +17,7 @@ concurrency:
 jobs:
   secret-scan:
     name: Secret scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -32,7 +32,7 @@ jobs:
 
   build:
     name: Build and test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -44,10 +44,10 @@ jobs:
           cache: maven
 
       - name: Validate Docker Compose file
-        run: docker compose config --quiet
+        run: docker compose --profile apps --profile tools config --quiet
 
-      # verify = compile (warnings are errors) + unit tests + Testcontainers integration tests
-      #          + Spotless format check + JaCoCo coverage report
+      # verify = compile (Error Prone, warnings are errors) + unit tests + Testcontainers integration tests
+      #          (including the Toxiproxy chaos suite) + Spotless format check + JaCoCo coverage report
       - name: Build and test
         run: ./mvnw --batch-mode --no-transfer-progress verify
 
@@ -57,8 +57,147 @@ jobs:
         with:
           name: test-reports
           path: |
+            libs/*/target/surefire-reports/
+            libs/*/target/failsafe-reports/
             services/*/target/surefire-reports/
             services/*/target/failsafe-reports/
             services/*/target/site/jacoco/
           retention-days: 14
           if-no-files-found: ignore
+
+  contracts:
+    name: Contracts (buf lint and breaking)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write # buf posts its findings as a PR comment
+    steps:
+      - uses: actions/checkout@v7
+      # Breaking-change detection compares the protos with main. An intentional break (a new major API version) is
+      # acknowledged with the "buf skip breaking" label on the pull request.
+      - uses: bufbuild/buf-action@v1
+        with:
+          version: 1.57.0
+          input: libs/proto
+          lint: true
+          format: false
+          breaking: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'buf skip breaking') }}
+          breaking_against: ${{ github.event.repository.clone_url }}#branch=${{ github.base_ref }},subdir=libs/proto
+          push: false
+
+  observability:
+    name: Alert rules and dashboards
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check Prometheus configuration and alert rules
+        run: >-
+          docker run --rm -v "$PWD/observability/prometheus:/cfg:ro" -w /cfg --entrypoint promtool
+          prom/prometheus:v3.5.0 check config prometheus.yml
+      - name: Unit-test alert rules
+        run: >-
+          docker run --rm -v "$PWD/observability/prometheus:/cfg:ro" -w /cfg --entrypoint promtool
+          prom/prometheus:v3.5.0 test rules alert_rules_test.yml
+      - name: Dashboards are valid JSON
+        run: for f in observability/grafana/dashboards/*.json; do jq empty "$f"; done
+
+  terraform:
+    name: Terraform (fmt and validate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.3
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false -input=false
+        working-directory: infra/terraform/environments/dev
+      - run: terraform validate
+        working-directory: infra/terraform/environments/dev
+
+  security-scan:
+    name: Dependency and configuration scan (Trivy)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write # upload findings to GitHub code scanning
+    steps:
+      - uses: actions/checkout@v7
+      - name: Scan dependencies, Dockerfile and Terraform
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scanners: vuln,misconfig,secret
+          format: sarif
+          output: trivy-fs.sarif
+          severity: MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: true
+      - uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+      - name: Fail on critical findings
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scanners: vuln,misconfig,secret
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-setup-trivy: true
+
+  system:
+    name: Images, full stack and smoke test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    needs: build
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the five service images
+        run: docker compose --profile apps build
+
+      - name: Scan the images (Trivy)
+        run: |
+          for service in api-gateway inventory-service order-service payment-service notification-worker; do
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.65.0 image \
+              --quiet --severity CRITICAL --ignore-unfixed --exit-code 1 "stockforge/$service:local"
+          done
+
+      - name: Start the whole system
+        run: docker compose --profile apps --profile tools up -d --wait --wait-timeout 300
+
+      - name: Smoke test through the gateway (k6)
+        run: >-
+          docker run --rm --network host -v "$PWD/load-tests:/scripts:ro"
+          grafana/k6:1.3.0 run --quiet /scripts/smoke.js
+
+      - name: Short flash sale — no oversell under contention
+        run: >-
+          docker run --rm --network host -v "$PWD/load-tests:/scripts:ro"
+          -e STOCK=50 -e BUYERS=500 -e RATE=100 -e CORRECTNESS_ONLY=true
+          grafana/k6:1.3.0 run --quiet /scripts/reservation-contention.js
+
+      # Every promise in README.md — API status codes, ownership, idempotency, DLT replay, API docs, dashboards, alert
+      # rules, Kafka UI, and one trace across all five services — checked against the running stack.
+      - name: README promises hold
+        run: bash scripts/verify-readme.sh
+
+      - name: Database invariants hold
+        run: bash scripts/verify-invariants.sh
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose --profile apps logs --no-color --tail 300
+
+      - name: Stop
+        if: always()
+        run: docker compose --profile apps down -v

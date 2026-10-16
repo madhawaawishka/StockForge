@@ -5,6 +5,7 @@ import com.stockforge.inventory.domain.model.UserId;
 import com.stockforge.inventory.domain.port.IdempotencyKeyRepository;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -51,21 +52,18 @@ public class InMemoryIdempotencyKeyRepository implements IdempotencyKeyRepositor
     }
 
     @Override
-    public synchronized void fail(String key, UserId userId) {
-        KeyScope scope = new KeyScope(key, userId);
-        IdempotencyRecord current = records.get(scope);
-        if (current != null) {
-            records.put(
-                    scope,
-                    new IdempotencyRecord(
-                            key,
-                            userId,
-                            current.requestHash(),
-                            "FAILED",
-                            null,
-                            null,
-                            current.createdAt(),
-                            current.expiresAt()));
-        }
+    public synchronized void release(String key, UserId userId) {
+        records.remove(new KeyScope(key, userId));
+    }
+
+    @Override
+    public synchronized int deleteExpired(Instant now, int batchSize) {
+        List<KeyScope> expired = records.entrySet().stream()
+                .filter(entry -> entry.getValue().expiresAt().isBefore(now))
+                .map(Map.Entry::getKey)
+                .limit(batchSize)
+                .toList();
+        expired.forEach(records::remove);
+        return expired.size();
     }
 }

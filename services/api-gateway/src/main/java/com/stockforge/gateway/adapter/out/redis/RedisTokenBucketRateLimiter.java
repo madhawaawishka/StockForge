@@ -1,113 +1,113 @@
 package com.stockforge.gateway.adapter.out.redis;
 
-import com.stockforge.gateway.domain.model.RateLimitResult;
+import com.stockforge.gateway.config.GatewayProperties;
 import com.stockforge.gateway.domain.port.RateLimiter;
-import java.time.Instant;
-import java.util.Collections;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 
-/** Atomic token-bucket rate limiter implemented via Redis Lua script (spec §17, §23 C). */
+/**
+ * Token-bucket rate limiter in Redis (spec §23 C). The check-and-take runs as one Lua script, so it is atomic across
+ * all gateway instances, and it uses Redis server time, so gateways with skewed clocks agree on refills.
+ *
+ * <p>When Redis is unreachable the limiter follows {@code gateway.rate-limit.fail-open} (ADR-010) behind the
+ * {@code rateLimiter} circuit breaker, so an outage costs one fast failed call per cool-down rather than a timeout per
+ * request. Decisions are counted in {@code stockforge_rate_limit_decisions_total{policy,outcome}}; every policy/outcome
+ * series exists from start-up at zero, so the first fail-open decision is visible to {@code rate()} and to the
+ * {@code RateLimiterDegraded} alert.
+ */
 @Component
-public class RedisTokenBucketRateLimiter implements RateLimiter {
+class RedisTokenBucketRateLimiter implements RateLimiter {
 
     private static final Logger log = LoggerFactory.getLogger(RedisTokenBucketRateLimiter.class);
 
-    private static final String LUA_SCRIPT = """
+    /** Returns {allowed (1/0), remaining tokens, retry-after seconds}. Raw List: Redis returns untyped arrays. */
+    @SuppressWarnings("rawtypes")
+    private static final RedisScript<List> TOKEN_BUCKET = RedisScript.of("""
             local key = KEYS[1]
             local capacity = tonumber(ARGV[1])
-            local refill_rate = tonumber(ARGV[2])
-            local requested = tonumber(ARGV[3])
-            local now = tonumber(ARGV[4])
+            local refill_per_ms = tonumber(ARGV[2]) / 1000
+            local time = redis.call('TIME')
+            local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 
-            local data = redis.call('HMGET', key, 'tokens', 'last_updated')
-            local tokens = tonumber(data[1])
-            local last_updated = tonumber(data[2])
+            local state = redis.call('HMGET', key, 'tokens', 'updated')
+            local tokens = tonumber(state[1]) or capacity
+            local updated = tonumber(state[2]) or now
+            tokens = math.min(capacity, tokens + math.max(0, now - updated) * refill_per_ms)
 
-            if tokens == nil then
-                tokens = capacity
-                last_updated = now
+            local allowed = 0
+            local retry_after = 0
+            if tokens >= 1 then
+                tokens = tokens - 1
+                allowed = 1
             else
-                local delta = math.max(0, now - last_updated)
-                tokens = math.min(capacity, tokens + delta * refill_rate)
-                last_updated = now
+                retry_after = math.ceil((1 - tokens) / refill_per_ms / 1000)
             end
+            redis.call('HSET', key, 'tokens', tokens, 'updated', now)
+            redis.call('PEXPIRE', key, math.ceil(capacity / refill_per_ms) + 60000)
+            return {allowed, math.floor(tokens), retry_after}
+            """, List.class);
 
-            if tokens >= requested then
-                tokens = tokens - requested
-                redis.call('HMSET', key, 'tokens', tokens, 'last_updated', last_updated)
-                redis.call('EXPIRE', key, math.ceil(capacity / refill_rate) + 60)
-                return {1, math.floor(tokens), 0}
-            else
-                local missing = requested - tokens
-                local retry_after = math.ceil(missing / refill_rate)
-                redis.call('HMSET', key, 'tokens', tokens, 'last_updated', last_updated)
-                redis.call('EXPIRE', key, math.ceil(capacity / refill_rate) + 60)
-                return {0, math.floor(tokens), retry_after}
-            end
-            """;
+    private static final List<String> OUTCOMES = List.of("allowed", "rejected", "fail_open", "fail_closed");
 
-    private final StringRedisTemplate redisTemplate;
+    private final StringRedisTemplate redis;
+    private final GatewayProperties.RateLimit config;
+    private final CircuitBreaker breaker;
+    private final MeterRegistry meters;
 
-    @SuppressWarnings("rawtypes")
-    private final DefaultRedisScript<List> script;
-
-    private final int defaultCapacity;
-    private final int defaultRefillRate;
-    private final boolean failOpen;
-
-    public RedisTokenBucketRateLimiter(StringRedisTemplate redisTemplate) {
-        this(redisTemplate, 100, 10, true);
-    }
-
-    @SuppressWarnings("rawtypes")
-    public RedisTokenBucketRateLimiter(
-            StringRedisTemplate redisTemplate, int defaultCapacity, int defaultRefillRate, boolean failOpen) {
-        this.redisTemplate = redisTemplate;
-        this.defaultCapacity = defaultCapacity;
-        this.defaultRefillRate = defaultRefillRate;
-        this.failOpen = failOpen;
-        this.script = new DefaultRedisScript<>();
-        this.script.setScriptText(LUA_SCRIPT);
-        this.script.setResultType(List.class);
+    RedisTokenBucketRateLimiter(
+            StringRedisTemplate redis,
+            GatewayProperties properties,
+            CircuitBreakerRegistry breakers,
+            MeterRegistry meters) {
+        this.redis = redis;
+        this.config = properties.rateLimit();
+        this.breaker = breakers.circuitBreaker("rateLimiter");
+        this.meters = meters;
+        config.policies().keySet().forEach(policy -> OUTCOMES.forEach(outcome -> counter(policy, outcome)));
     }
 
     @Override
-    public RateLimitResult tryAcquire(String key, int tokensRequested) {
-        if (redisTemplate == null) {
-            return RateLimitResult.allowed(defaultCapacity);
+    public Decision tryAcquire(String policy, String key) {
+        GatewayProperties.Bucket bucket = config.policies().get(policy);
+        if (bucket == null) {
+            throw new IllegalArgumentException("No rate limit policy named " + policy);
         }
-
+        Decision decision;
         try {
-            long nowEpochSeconds = Instant.now().getEpochSecond();
-            String redisKey = "rate_limit:" + key;
-            List<?> result = redisTemplate.execute(
-                    script,
-                    Collections.singletonList(redisKey),
-                    String.valueOf(defaultCapacity),
-                    String.valueOf(defaultRefillRate),
-                    String.valueOf(tokensRequested),
-                    String.valueOf(nowEpochSeconds));
-
-            if (result != null && result.size() >= 3) {
-                long allowedFlag = ((Number) result.get(0)).longValue();
-                long remaining = ((Number) result.get(1)).longValue();
-                long retryAfter = ((Number) result.get(2)).longValue();
-
-                if (allowedFlag == 1L) {
-                    return RateLimitResult.allowed(remaining);
-                } else {
-                    return RateLimitResult.rejected(retryAfter);
-                }
-            }
-            return RateLimitResult.allowed(defaultCapacity);
-        } catch (Exception e) {
-            log.warn("Redis rate limiter unavailable: {}. Fail-open policy={}", e.getMessage(), failOpen);
-            return failOpen ? RateLimitResult.allowed(defaultCapacity) : RateLimitResult.rejected(1);
+            List<?> result = breaker.executeSupplier(() -> redis.execute(
+                    TOKEN_BUCKET,
+                    List.of("stockforge:rate-limit:" + policy + ":" + key),
+                    String.valueOf(bucket.capacity()),
+                    String.valueOf(bucket.refillPerSecond())));
+            decision = ((Number) result.get(0)).longValue() == 1
+                    ? Decision.allow(((Number) result.get(1)).longValue())
+                    : Decision.reject(((Number) result.get(2)).longValue());
+            count(policy, decision.allowed() ? "allowed" : "rejected");
+        } catch (RuntimeException unavailable) {
+            log.debug("Rate limiter unavailable, failing {}", config.failOpen() ? "open" : "closed", unavailable);
+            count(policy, config.failOpen() ? "fail_open" : "fail_closed");
+            decision = config.failOpen() ? Decision.allow(bucket.capacity()) : Decision.reject(1);
         }
+        return decision;
+    }
+
+    private void count(String policy, String outcome) {
+        counter(policy, outcome).increment();
+    }
+
+    private Counter counter(String policy, String outcome) {
+        return Counter.builder("stockforge.rate.limit.decisions")
+                .description("Rate limiter decisions")
+                .tag("policy", policy)
+                .tag("outcome", outcome)
+                .register(meters);
     }
 }

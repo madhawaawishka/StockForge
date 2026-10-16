@@ -1,226 +1,312 @@
 package com.stockforge.inventory.adapter.in.grpc;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.stockforge.inventory.application.CancelReservationResult;
+import com.stockforge.grpc.GrpcProblems;
+import com.stockforge.inventory.adapter.in.TransientFailureRetry;
+import com.stockforge.inventory.application.AdjustStockUseCase;
 import com.stockforge.inventory.application.CancelReservationUseCase;
-import com.stockforge.inventory.application.ConfirmReservationResult;
-import com.stockforge.inventory.application.ConfirmReservationUseCase;
+import com.stockforge.inventory.application.CreateProductUseCase;
 import com.stockforge.inventory.application.GetReservationUseCase;
 import com.stockforge.inventory.application.ProductCatalogQueries;
-import com.stockforge.inventory.application.ReserveStockCommand;
-import com.stockforge.inventory.application.ReserveStockResult;
 import com.stockforge.inventory.application.ReserveStockUseCase;
-import com.stockforge.inventory.domain.model.Inventory;
 import com.stockforge.inventory.domain.model.ProductId;
-import com.stockforge.inventory.domain.model.Reservation;
-import com.stockforge.inventory.domain.model.ReservationId;
-import com.stockforge.inventory.domain.model.UserId;
+import com.stockforge.inventory.testsupport.InMemoryProductCache;
+import com.stockforge.inventory.testsupport.InventoryFixture;
+import com.stockforge.inventory.v1.AdjustStockRequest;
+import com.stockforge.inventory.v1.AdjustStockResponse;
 import com.stockforge.inventory.v1.CancelReservationRequest;
 import com.stockforge.inventory.v1.CancelReservationResponse;
-import com.stockforge.inventory.v1.ConfirmReservationRequest;
-import com.stockforge.inventory.v1.ConfirmReservationResponse;
+import com.stockforge.inventory.v1.CreateProductRequest;
+import com.stockforge.inventory.v1.CreateProductResponse;
 import com.stockforge.inventory.v1.GetAvailabilityRequest;
 import com.stockforge.inventory.v1.GetAvailabilityResponse;
 import com.stockforge.inventory.v1.GetReservationRequest;
+import com.stockforge.inventory.v1.GetReservationResponse;
+import com.stockforge.inventory.v1.ListProductsRequest;
+import com.stockforge.inventory.v1.ListProductsResponse;
 import com.stockforge.inventory.v1.ReserveStockRequest;
 import com.stockforge.inventory.v1.ReserveStockResponse;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
-import java.time.Instant;
-import java.util.Optional;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * The gRPC contract of the inventory service: business outcomes map to the status codes of spec §12 plus the problem
+ * type trailer the gateway relies on. Runs real use cases on in-memory adapters.
+ */
 class InventoryGrpcServiceTest {
 
-    private static final Instant NOW = Instant.parse("2026-10-08T10:15:30Z");
-    private static final ProductId PRODUCT_ID = ProductId.of(UUID.fromString("0192f5c4-7a1e-7c3b-9a55-2f1e4c8d9b10"));
-    private static final UserId USER_ID = UserId.of(UUID.fromString("0192f5c4-6b0d-7e21-8f43-1a2b3c4d5e6f"));
-    private static final ReservationId RESERVATION_ID =
-            ReservationId.of(UUID.fromString("0192f5c4-5a0c-7d10-8e32-0a1b2c3d4e5f"));
+    private static final String ALICE = "0192f5c4-6b0d-7e21-8f43-1a2b3c4d5e6f";
+    private static final String MALLORY = "0192f5c4-6b0d-7e21-8f43-1a2b3c4d5e99";
+    private static final String ADMIN = "0192f5c4-0000-7000-8000-0000000000ad";
 
-    private ReserveStockUseCase reserveStockUseCase;
-    private CancelReservationUseCase cancelReservationUseCase;
-    private ConfirmReservationUseCase confirmReservationUseCase;
-    private ProductCatalogQueries productCatalogQueries;
-    private GetReservationUseCase getReservationUseCase;
-    private InventoryGrpcService grpcService;
+    private InventoryFixture fixture;
+    private InventoryGrpcService service;
+    private ProductId product;
 
     @BeforeEach
     void setUp() {
-        reserveStockUseCase = mock(ReserveStockUseCase.class);
-        cancelReservationUseCase = mock(CancelReservationUseCase.class);
-        confirmReservationUseCase = mock(ConfirmReservationUseCase.class);
-        productCatalogQueries = mock(ProductCatalogQueries.class);
-        getReservationUseCase = mock(GetReservationUseCase.class);
-
-        grpcService = new InventoryGrpcService(
-                reserveStockUseCase,
-                cancelReservationUseCase,
-                confirmReservationUseCase,
-                productCatalogQueries,
-                getReservationUseCase);
+        fixture = new InventoryFixture();
+        InMemoryProductCache cache = new InMemoryProductCache();
+        service = new InventoryGrpcService(
+                new CreateProductUseCase(
+                        fixture.products, fixture.inventories, fixture.auditLog, fixture.ids, fixture.clock),
+                new ProductCatalogQueries(fixture.products, fixture.inventories, cache),
+                new AdjustStockUseCase(
+                        fixture.inventories,
+                        fixture.idempotencyKeys,
+                        fixture.auditLog,
+                        cache,
+                        fixture.clock,
+                        InventoryFixture.POLICY),
+                new ReserveStockUseCase(
+                        fixture.products,
+                        fixture.strategy,
+                        fixture.reservations,
+                        fixture.idempotencyKeys,
+                        fixture.purchaseLimits,
+                        fixture.outbox,
+                        fixture.ids,
+                        fixture.clock,
+                        InventoryFixture.POLICY),
+                new GetReservationUseCase(fixture.reservations),
+                new CancelReservationUseCase(
+                        fixture.reservations,
+                        fixture.inventories,
+                        fixture.purchaseLimits,
+                        fixture.outbox,
+                        fixture.clock),
+                new TransientFailureRetry(3));
+        product = fixture.product("SNEAKER-1", 2);
     }
 
     @Test
-    void reserveStockSuccess() {
-        Reservation reservation = Reservation.create(RESERVATION_ID, USER_ID, PRODUCT_ID, 2, NOW.plusSeconds(600), NOW);
-        when(reserveStockUseCase.execute(any(ReserveStockCommand.class)))
-                .thenReturn(new ReserveStockResult.Reserved(reservation));
+    void reservesAndFlagsAReplay() {
+        ReserveStockResponse first = InventoryGrpcServiceTest.<ReserveStockResponse>call(
+                observer -> service.reserveStock(reserve("key-1", 1), observer));
+        ReserveStockResponse replay = InventoryGrpcServiceTest.<ReserveStockResponse>call(
+                observer -> service.reserveStock(reserve("key-1", 1), observer));
 
-        ReserveStockRequest request = ReserveStockRequest.newBuilder()
-                .setProductId(PRODUCT_ID.value().toString())
-                .setUserId(USER_ID.value().toString())
-                .setQuantity(2)
-                .setIdempotencyKey("idemp-1")
+        assertThat(first.getReservation().getStatus()).isEqualTo("PENDING");
+        assertThat(first.getReservation().getUserId()).isEqualTo(ALICE);
+        assertThat(first.getIdempotentReplay()).isFalse();
+        assertThat(replay.getReservation().getId())
+                .isEqualTo(first.getReservation().getId());
+        assertThat(replay.getIdempotentReplay()).isTrue();
+    }
+
+    @Test
+    void soldOutIsFailedPreconditionWithTheInsufficientStockProblemType() {
+        assertProblem(
+                () -> InventoryGrpcServiceTest.<ReserveStockResponse>call(
+                        observer -> service.reserveStock(reserve("key-1", 3), observer)),
+                Status.Code.FAILED_PRECONDITION,
+                GrpcProblems.PURCHASE_LIMIT_EXCEEDED);
+        InventoryGrpcServiceTest.<ReserveStockResponse>call(
+                observer -> service.reserveStock(reserve("key-2", 2), observer));
+
+        assertProblem(
+                () -> InventoryGrpcServiceTest.<ReserveStockResponse>call(observer -> service.reserveStock(
+                        reserve("key-3", 1).toBuilder().setUserId(MALLORY).build(), observer)),
+                Status.Code.FAILED_PRECONDITION,
+                GrpcProblems.INSUFFICIENT_STOCK);
+    }
+
+    @Test
+    void malformedIdsAreInvalidArgument() {
+        assertProblem(
+                () -> InventoryGrpcServiceTest.<ReserveStockResponse>call(observer -> service.reserveStock(
+                        reserve("key-1", 1).toBuilder()
+                                .setProductId("not-a-uuid")
+                                .build(),
+                        observer)),
+                Status.Code.INVALID_ARGUMENT,
+                GrpcProblems.VALIDATION_FAILED);
+    }
+
+    @Test
+    void anotherUsersReservationIsNotFoundButAPrivilegedCallerSeesIt() {
+        String id = InventoryGrpcServiceTest.<ReserveStockResponse>call(
+                        observer -> service.reserveStock(reserve("key-1", 1), observer))
+                .getReservation()
+                .getId();
+
+        assertProblem(
+                () -> InventoryGrpcServiceTest.<GetReservationResponse>call(observer -> service.getReservation(
+                        GetReservationRequest.newBuilder()
+                                .setReservationId(id)
+                                .setRequesterUserId(MALLORY)
+                                .build(),
+                        observer)),
+                Status.Code.NOT_FOUND,
+                GrpcProblems.RESERVATION_NOT_FOUND);
+        GetReservationResponse privileged =
+                InventoryGrpcServiceTest.<GetReservationResponse>call(observer -> service.getReservation(
+                        GetReservationRequest.newBuilder().setReservationId(id).build(), observer));
+        assertThat(privileged.getReservation().getId()).isEqualTo(id);
+    }
+
+    @Test
+    void cancelsOwnReservationOnlyOnce() {
+        String id = InventoryGrpcServiceTest.<ReserveStockResponse>call(
+                        observer -> service.reserveStock(reserve("key-1", 1), observer))
+                .getReservation()
+                .getId();
+        CancelReservationRequest cancel = CancelReservationRequest.newBuilder()
+                .setReservationId(id)
+                .setRequesterUserId(ALICE)
                 .build();
 
-        AtomicReference<ReserveStockResponse> responseRef = new AtomicReference<>();
-        grpcService.reserveStock(request, new SimpleStreamObserver<>() {
-            @Override
-            public void onNext(ReserveStockResponse value) {
-                responseRef.set(value);
-            }
-        });
+        CancelReservationResponse cancelled = InventoryGrpcServiceTest.<CancelReservationResponse>call(
+                observer -> service.cancelReservation(cancel, observer));
 
-        assertThat(responseRef.get()).isNotNull();
-        assertThat(responseRef.get().getReservationId())
-                .isEqualTo(RESERVATION_ID.value().toString());
-        assertThat(responseRef.get().getStatus()).isEqualTo("PENDING");
+        assertThat(cancelled.getReservation().getStatus()).isEqualTo("CANCELLED");
+        assertProblem(
+                () -> InventoryGrpcServiceTest.<CancelReservationResponse>call(
+                        observer -> service.cancelReservation(cancel, observer)),
+                Status.Code.FAILED_PRECONDITION,
+                GrpcProblems.INVALID_RESERVATION_STATE);
     }
 
     @Test
-    void reserveStockInsufficientStockReturnsFailedPrecondition() {
-        when(reserveStockUseCase.execute(any(ReserveStockCommand.class)))
-                .thenReturn(new ReserveStockResult.InsufficientStock(PRODUCT_ID, 5));
-
-        ReserveStockRequest request = ReserveStockRequest.newBuilder()
-                .setProductId(PRODUCT_ID.value().toString())
-                .setUserId(USER_ID.value().toString())
-                .setQuantity(5)
-                .setIdempotencyKey("idemp-2")
-                .build();
-
-        AtomicReference<Throwable> errorRef = new AtomicReference<>();
-        grpcService.reserveStock(request, new SimpleStreamObserver<>() {
-            @Override
-            public void onError(Throwable t) {
-                errorRef.set(t);
-            }
-        });
-
-        assertThat(errorRef.get()).isInstanceOf(StatusRuntimeException.class);
-        StatusRuntimeException ex = (StatusRuntimeException) errorRef.get();
-        assertThat(ex.getStatus().getCode()).isEqualTo(Status.Code.FAILED_PRECONDITION);
-    }
-
-    @Test
-    void cancelReservationSuccess() {
-        Reservation reservation = Reservation.create(RESERVATION_ID, USER_ID, PRODUCT_ID, 2, NOW.plusSeconds(600), NOW);
-        when(cancelReservationUseCase.execute(RESERVATION_ID))
-                .thenReturn(new CancelReservationResult.Cancelled(reservation.cancel(NOW)));
-
-        CancelReservationRequest request = CancelReservationRequest.newBuilder()
-                .setReservationId(RESERVATION_ID.value().toString())
-                .setUserId(USER_ID.value().toString())
-                .build();
-
-        AtomicReference<CancelReservationResponse> responseRef = new AtomicReference<>();
-        grpcService.cancelReservation(request, new SimpleStreamObserver<>() {
-            @Override
-            public void onNext(CancelReservationResponse value) {
-                responseRef.set(value);
-            }
-        });
-
-        assertThat(responseRef.get()).isNotNull();
-        assertThat(responseRef.get().getStatus()).isEqualTo("CANCELLED");
-    }
-
-    @Test
-    void confirmReservationSuccess() {
-        Reservation reservation = Reservation.create(RESERVATION_ID, USER_ID, PRODUCT_ID, 2, NOW.plusSeconds(600), NOW);
-        when(confirmReservationUseCase.execute(RESERVATION_ID))
-                .thenReturn(new ConfirmReservationResult.Confirmed(reservation.confirm(NOW)));
-
-        ConfirmReservationRequest request = ConfirmReservationRequest.newBuilder()
-                .setReservationId(RESERVATION_ID.value().toString())
-                .build();
-
-        AtomicReference<ConfirmReservationResponse> responseRef = new AtomicReference<>();
-        grpcService.confirmReservation(request, new SimpleStreamObserver<>() {
-            @Override
-            public void onNext(ConfirmReservationResponse value) {
-                responseRef.set(value);
-            }
-        });
-
-        assertThat(responseRef.get()).isNotNull();
-        assertThat(responseRef.get().getStatus()).isEqualTo("CONFIRMED");
-    }
-
-    @Test
-    void getAvailabilitySuccess() {
-        Inventory inv = Inventory.initial(PRODUCT_ID, 10, NOW).reserve(2, NOW);
-        when(productCatalogQueries.findInventory(PRODUCT_ID)).thenReturn(Optional.of(inv));
-
+    void availabilityIsApproximateWhenServedFromTheCache() {
         GetAvailabilityRequest request = GetAvailabilityRequest.newBuilder()
-                .setProductId(PRODUCT_ID.value().toString())
+                .setProductId(product.toString())
                 .build();
 
-        AtomicReference<GetAvailabilityResponse> responseRef = new AtomicReference<>();
-        grpcService.getAvailability(request, new SimpleStreamObserver<>() {
-            @Override
-            public void onNext(GetAvailabilityResponse value) {
-                responseRef.set(value);
-            }
-        });
+        GetAvailabilityResponse fromDatabase = InventoryGrpcServiceTest.<GetAvailabilityResponse>call(
+                observer -> service.getAvailability(request, observer));
+        GetAvailabilityResponse fromCache = InventoryGrpcServiceTest.<GetAvailabilityResponse>call(
+                observer -> service.getAvailability(request, observer));
 
-        assertThat(responseRef.get()).isNotNull();
-        assertThat(responseRef.get().getAvailableQuantity()).isEqualTo(8);
-        assertThat(responseRef.get().getReservedQuantity()).isEqualTo(2);
+        assertThat(fromDatabase.getAvailability().getAvailableQuantity()).isEqualTo(2);
+        assertThat(fromDatabase.getAvailability().getApproximate()).isFalse();
+        assertThat(fromCache.getAvailability().getApproximate()).isTrue();
     }
 
     @Test
-    void getReservationEnforcesObjectLevelAuthorization() {
-        Reservation reservation = Reservation.create(RESERVATION_ID, USER_ID, PRODUCT_ID, 2, NOW.plusSeconds(600), NOW);
-        when(getReservationUseCase.execute(RESERVATION_ID)).thenReturn(Optional.of(reservation));
+    void adminCreatesProductsAndAdjustsStock() {
+        CreateProductResponse created =
+                InventoryGrpcServiceTest.<CreateProductResponse>call(observer -> service.createProduct(
+                        CreateProductRequest.newBuilder()
+                                .setSku("NEW-SKU-1")
+                                .setName("New product")
+                                .setPriceAmount("10.00")
+                                .setPriceCurrency("USD")
+                                .setInitialStock(5)
+                                .setActorId(ADMIN)
+                                .build(),
+                        observer));
+        AdjustStockResponse adjusted =
+                InventoryGrpcServiceTest.<AdjustStockResponse>call(observer -> service.adjustStock(
+                        AdjustStockRequest.newBuilder()
+                                .setProductId(created.getProduct().getId())
+                                .setDelta(-2)
+                                .setReason("Damaged in storage")
+                                .setActorId(ADMIN)
+                                .setIdempotencyKey("adj-1")
+                                .build(),
+                        observer));
 
-        UserId otherUser = UserId.of(UUID.fromString("0192f5c4-9999-7000-8000-000000000000"));
-        GetReservationRequest request = GetReservationRequest.newBuilder()
-                .setReservationId(RESERVATION_ID.value().toString())
-                .setUserId(otherUser.value().toString())
-                .build();
-
-        AtomicReference<Throwable> errorRef = new AtomicReference<>();
-        grpcService.getReservation(request, new SimpleStreamObserver<>() {
-            @Override
-            public void onError(Throwable t) {
-                errorRef.set(t);
-            }
-        });
-
-        assertThat(errorRef.get()).isInstanceOf(StatusRuntimeException.class);
-        StatusRuntimeException ex = (StatusRuntimeException) errorRef.get();
-        // BOLA defense (§28): returns NOT_FOUND rather than forbidden to prevent probing
-        assertThat(ex.getStatus().getCode()).isEqualTo(Status.Code.NOT_FOUND);
+        assertThat(created.getAvailability().getTotalQuantity()).isEqualTo(5);
+        assertThat(adjusted.getAvailability().getTotalQuantity()).isEqualTo(3);
+        assertThat(fixture.auditLog.entries())
+                .extracting(entry -> entry.action())
+                .containsExactly("PRODUCT_CREATED", "STOCK_ADJUSTED");
     }
 
-    private static class SimpleStreamObserver<T> implements StreamObserver<T> {
-        @Override
-        public void onNext(T value) {}
+    @Test
+    void duplicateSkuIsAlreadyExists() {
+        CreateProductRequest request = CreateProductRequest.newBuilder()
+                .setSku("SNEAKER-1")
+                .setName("Duplicate")
+                .setPriceAmount("10.00")
+                .setPriceCurrency("USD")
+                .setInitialStock(1)
+                .setActorId(ADMIN)
+                .build();
 
-        @Override
-        public void onError(Throwable t) {}
+        assertProblem(
+                () -> InventoryGrpcServiceTest.<CreateProductResponse>call(
+                        observer -> service.createProduct(request, observer)),
+                Status.Code.ALREADY_EXISTS,
+                GrpcProblems.SKU_ALREADY_EXISTS);
+    }
 
-        @Override
-        public void onCompleted() {}
+    @Test
+    void listsProductsWithAKeysetCursor() {
+        fixture.product("SNEAKER-2", 1);
+        fixture.product("SNEAKER-3", 1);
+
+        ListProductsResponse first =
+                InventoryGrpcServiceTest.<ListProductsResponse>call(observer -> service.listProducts(
+                        ListProductsRequest.newBuilder().setLimit(2).build(), observer));
+        ListProductsResponse second =
+                InventoryGrpcServiceTest.<ListProductsResponse>call(observer -> service.listProducts(
+                        ListProductsRequest.newBuilder()
+                                .setLimit(2)
+                                .setCursor(first.getNextCursor())
+                                .build(),
+                        observer));
+
+        assertThat(first.getProductsList()).extracting(p -> p.getSku()).containsExactly("SNEAKER-1", "SNEAKER-2");
+        assertThat(second.getProductsList()).extracting(p -> p.getSku()).containsExactly("SNEAKER-3");
+        assertThat(second.getNextCursor()).isEmpty();
+    }
+
+    private ReserveStockRequest reserve(String key, int quantity) {
+        return ReserveStockRequest.newBuilder()
+                .setProductId(product.toString())
+                .setUserId(ALICE)
+                .setQuantity(quantity)
+                .setIdempotencyKey(key)
+                .build();
+    }
+
+    private static void assertProblem(Runnable call, Status.Code code, String problemType) {
+        assertThatThrownBy(call::run).isInstanceOfSatisfying(StatusRuntimeException.class, error -> {
+            assertThat(error.getStatus().getCode()).isEqualTo(code);
+            assertThat(GrpcProblems.problemTypeOf(error)).isEqualTo(problemType);
+        });
+    }
+
+    /** Runs a unary call and returns its single response. */
+    private static <T> T call(java.util.function.Consumer<StreamObserver<T>> invocation) {
+        List<T> responses = new ArrayList<>();
+        invocation.accept(new StreamObserver<>() {
+            @Override
+            public void onNext(T value) {
+                responses.add(value);
+            }
+
+            @Override
+            public void onError(Throwable error) {
+                throw new AssertionError("unexpected onError", error);
+            }
+
+            @Override
+            public void onCompleted() {}
+        });
+        assertThat(responses).hasSize(1);
+        return responses.getFirst();
+    }
+
+    @Test
+    void unknownIdsAreNotFound() {
+        assertProblem(
+                () -> InventoryGrpcServiceTest.<GetAvailabilityResponse>call(observer -> service.getAvailability(
+                        GetAvailabilityRequest.newBuilder()
+                                .setProductId(UUID.randomUUID().toString())
+                                .build(),
+                        observer)),
+                Status.Code.NOT_FOUND,
+                GrpcProblems.PRODUCT_NOT_FOUND);
     }
 }
