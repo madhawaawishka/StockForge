@@ -1,43 +1,41 @@
-# HikariCP Connection Pool Sizing & Resource Management (W3-05)
+# Connection pool sizing
 
-## 1. Pool Sizing Rationale (Spec §24)
+**Decision.** Every service has a fixed pool of 10 PostgreSQL connections (`*_DB_POOL_SIZE`), a 1 s
+`connection-timeout`, and server-side `statement_timeout` (5 s), `lock_timeout` (2 s) and
+`idle_in_transaction_session_timeout` (10 s). Requests that cannot get a connection within a second fail with
+503 + Retry-After instead of queueing (spec §23 D, §24).
 
-A common mistake in backend engineering is sizing the database connection pool based on the number of concurrent HTTP threads (e.g. 100 or 500 connections). In PostgreSQL, each client connection is a dedicated backend OS process. Excessive connections cause:
-1. Context switching overhead on the database server.
-2. Contention on PostgreSQL buffer cache latches and lock tables.
-3. Connection starvation and exhaustion of `max_connections`.
+## Why small
+A PostgreSQL connection is a server process. Throughput is bounded by the CPU and disk of the database, not by the
+number of connections; past a few connections per core, more of them add context switches and lock contention. For a
+hot row it is worse: only one transaction can hold the row lock, so extra connections only add waiters.
 
-### Formula (HikariCP / Little's Law)
-$$\text{Pool Size} = (\text{CPU Cores} \times 2) + \text{Effective Spindle Count}$$
+Little's law gives the capacity of a pool: **throughput = connections / time each request holds one**. The measured
+hold time decides whether 10 is enough.
 
-For a 4-core database server with SSD storage:
-$$\text{Pool Size} = (4 \times 2) + 1 = 9 \text{ to } 10 \text{ connections}$$
+## Measured
+From the flash-sale runs in [concurrency-strategies.md](concurrency-strategies.md) (500 req/s on one product):
 
-### Throughput Verification with Little's Law
-If average transaction duration $T = 5\text{ ms}$ ($0.005\text{ s}$), a pool of 10 connections can service:
-$$\text{Throughput} = \frac{10}{0.005} = 2,000 \text{ transactions / second}$$
+| Strategy | Server time per reservation (mean) | Capacity of 10 connections (Little's law) | Max requests waiting for a connection |
+| :--- | ---: | ---: | ---: |
+| Atomic conditional update | ≈ 10 ms | ≈ 1,000 req/s | **0** |
+| Pessimistic locking | grows with the queue on the row lock (not isolated) | below 500 req/s in practice | 92 |
+| Optimistic locking | grows with conflicts: up to 5 attempts with sleeps, inside the transaction | below 500 req/s in practice | 191 |
 
-## 2. Configuration Settings
+With the atomic update the pool never ran dry at 500 req/s. With the other two, the time each request held its
+connection grew with contention — the pool did not shrink, the hold time grew — and starvation followed. A bigger pool
+would not have helped: the extra connections would also have waited on the same row lock, while the database
+handled more sessions.
 
-Configured per service in `application.yml`:
-```yaml
-spring:
-  datasource:
-    hikari:
-      maximum-pool-size: 10
-      minimum-idle: 10
-      connection-timeout: 250        # ms (fail fast before client timeout)
-      idle-timeout: 600000           # 10 min
-      max-lifetime: 1800000          # 30 min
-      pool-name: InventoryHikariPool
-```
+## What starvation looks like, and the guard rails
+- `hikaricp_connections_pending > 0` for a minute → alert `DatabasePoolStarved` (RUNBOOK-004).
+- Requests fail after 1 s with `CannotCreateTransactionException`, which the services answer as 503 / `UNAVAILABLE`
+  (POSTMORTEM-006), and the gateway's circuit breaker sheds load until the service recovers.
+- Statement and lock timeouts bound how long any one transaction can hold a connection; the chaos test
+  `databasePartitionFailsFastWith503AndRecovers` shows the pool recovering on its own after a network partition.
 
-## 3. Observability & Micrometer Metrics
-
-HikariCP metrics exposed at `/actuator/prometheus`:
-- `hikaricp_connections_active` (currently leased to application threads)
-- `hikaricp_connections_idle` (waiting in the pool)
-- `hikaricp_connections_pending` (threads blocked waiting for a connection)
-- `hikaricp_connections_acquire_seconds` (time spent acquiring a connection)
-
-An alert should fire if `hikaricp_connections_pending > 5` for 10 seconds or if `acquire_seconds > 0.05`.
+## Budget
+Five services × 10 connections = 50, well below PostgreSQL's default `max_connections` of 100, leaving room for
+migrations, operators and a second instance of each service. Running more instances means dividing, not multiplying:
+keep the *total* per database roughly constant (for example 2 instances × 5 connections), or put PgBouncer in
+transaction mode in front of the database.

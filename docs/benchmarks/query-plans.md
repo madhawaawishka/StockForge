@@ -1,104 +1,109 @@
-# Database Query Plans & EXPLAIN ANALYZE Report (W3-04)
+# Query plans on a large dataset
 
-This report documents query execution plans, index justifications, and performance measurements on the seeded large dataset (100k products, 200k reservations, 500k orders) per specification §13.
+`EXPLAIN (ANALYZE, BUFFERS)` of the queries that run constantly (workers, relays) or under contention (the hot path),
+captured on 2026-10-14 with PostgreSQL 18.6 in Docker (environment in [README.md](README.md)) after loading
+[`database/seed/seed-large-dataset.sql`](../../database/seed/seed-large-dataset.sql):
 
----
+| Table | Rows |
+| :--- | ---: |
+| `inventory.products`, `inventory.inventory` | 100,036 |
+| `inventory.reservations` | ≈ 562,000 |
+| `inventory.user_product_limits` | ≈ 350,000 |
+| `inventory.outbox_events` | ≈ 1,150,000 (almost all `PUBLISHED`) |
+| `ordering.orders` | ≈ 325,000 (20,011 users) |
 
-## 1. Expiry Scan Query
+Reproduce with [`database/seed/explain-hot-queries.sql`](../../database/seed/explain-hot-queries.sql), which uses the
+repositories' exact SQL and rolls back every locking statement.
 
-### Business Operation
-Reservation expiry background worker (`SKIP LOCKED`) identifying expired pending reservations:
-```sql
-SELECT id, product_id, quantity
-FROM inventory.reservations
-WHERE status = 'PENDING' AND expires_at < now()
-ORDER BY expires_at
-LIMIT 200
-FOR UPDATE SKIP LOCKED;
+## Summary
+| # | Query | Runs | Plan | Execution |
+| :---: | :--- | :--- | :--- | ---: |
+| 1 | expiry worker claim | every second | index scan on partial index `idx_reservations_pending_expires_at` | **0.80 ms** |
+| 2 | outbox relay poll | every 200 ms per service | index scan on partial index `outbox_events_pending_idx` | **0.38 ms** |
+| 3 | order history, first page | per request | bitmap scan on `idx_orders_user_history` + sort of 16 rows | **0.62 ms** |
+| 4 | order history, later page (keyset) | per request | same index, bounded by `(created_at, id)` | **0.04 ms** |
+| 5 | saga payment-timeout claim | every few seconds | index scan on partial index `orders_awaiting_payment_idx` | **0.03 ms** |
+| 6 | conditional stock decrement (hot path) | every reservation | primary-key index scan | **0.25 ms** |
+| 7 | reconciliation (reserved vs pending) | every minute | hash join over the whole inventory table | **48.6 ms** |
+
+## What the partial indexes buy
+The two worker queries look for a tiny, moving subset of a large table: pending reservations past their expiry,
+unpublished outbox events. A partial index contains only that subset, so its size — and the query's cost — does not
+grow with history. Re-running them with index scans disabled shows the alternative:
+
+| Query | With partial index | Without (sequential scan) | Rows read without |
+| :--- | ---: | ---: | ---: |
+| 1 expiry claim | 0.80 ms, 123 buffers | 55.3 ms, 15,185 buffers | 562,107 |
+| 2 outbox poll | 0.38 ms, 69 buffers | 328.2 ms, 40,801 buffers | 1,149,214 |
+
+Every service polls its outbox five times a second; without the partial index, a week of history would cost each
+service more than a second and a half of sequential scanning per second of wall time.
+
+## Plans
+**1. Expiry worker claim** — `WHERE status = 'PENDING' AND expires_at < now() ORDER BY expires_at LIMIT 200 FOR UPDATE
+SKIP LOCKED`
+```
+Limit (actual time=0.765..0.765 rows=0.00 loops=1)
+  ->  LockRows
+        ->  Index Scan using idx_reservations_pending_expires_at on reservations
+              Index Cond: (expires_at < now())
+              Filter: (status = 'PENDING'::text)
+              Buffers: shared hit=123
+Execution Time: 0.796 ms
+```
+The index is already in `expires_at` order, so `ORDER BY … LIMIT` stops after the batch; `SKIP LOCKED` lets several
+workers claim disjoint batches. (The 25,000 expired reservations in the seed had been drained by the running expiry
+worker — at about 700 per second — by the time this plan was captured, hence 0 rows.)
+
+**2. Outbox relay poll** — `WHERE status = 'PENDING' ORDER BY seq LIMIT 100 FOR UPDATE SKIP LOCKED`
+```
+Limit (actual time=0.365..0.365 rows=0.00 loops=1)
+  ->  LockRows
+        ->  Index Scan using outbox_events_pending_idx on outbox_events
+              Buffers: shared hit=69
+Execution Time: 0.380 ms
 ```
 
-### Without Partial Index
-- **Plan:** `Seq Scan on reservations (cost=0.00..5421.00 rows=12500 width=48)` followed by `Sort (cost=6210.00..6241.00)`
-- **Execution Time:** ~42.3 ms
-- **I/O:** Scans all 200,000 reservation rows sequentially into buffer cache.
-
-### With Partial Index
-```sql
-CREATE INDEX idx_reservations_pending_expiry
-ON inventory.reservations (expires_at)
-WHERE status = 'PENDING';
+**3–4. Order history with keyset pagination** — `WHERE user_id = :u [AND (created_at, id) after the cursor] ORDER BY
+created_at DESC, id LIMIT 21`
 ```
-- **Plan:** `Limit (cost=0.29..8.45 rows=200 width=48)`  
-  `-> LockRows (cost=0.29..510.00 rows=12500 width=48)`  
-  `-> Index Scan using idx_reservations_pending_expiry on reservations (cost=0.29..385.00 rows=12500 width=48)`
-- **Execution Time:** **0.34 ms** (~124x speedup)
-- **Justification:** Keeps the index tiny (only indexes the ~5% active `PENDING` reservations). Excluded `CONFIRMED`, `EXPIRED`, and `CANCELLED` rows do not bloat the B-tree.
-
----
-
-## 2. Outbox Relay Polling Query
-
-### Business Operation
-Transactional outbox relay claiming pending events for Kafka publication:
-```sql
-SELECT id, aggregate_id, event_type, payload, correlation_id
-FROM ordering.outbox_events
-WHERE status = 'PENDING'
-ORDER BY created_at
-LIMIT 100
-FOR UPDATE SKIP LOCKED;
+Limit (actual time=0.586..0.588 rows=16.00 loops=1)
+  ->  Sort  Sort Key: created_at DESC, id   Sort Method: quicksort  Memory: 27kB
+        ->  Bitmap Heap Scan on orders
+              ->  Bitmap Index Scan on idx_orders_user_history
+                    Index Cond: (user_id = '2b966af9-…'::uuid)
+Execution Time: 0.618 ms
 ```
+With 16 orders for this user the planner prefers a bitmap scan and a tiny sort over walking the index in order; for a
+user with thousands of orders the same index provides the order directly. Later pages are bounded by the cursor
+instead of `OFFSET`, so page 1,000 costs the same as page 1 (0.04 ms above).
 
-### Without Partial Index
-- **Plan:** `Seq Scan on outbox_events (cost=0.00..4120.00 rows=5000 width=180)`
-- **Execution Time:** ~28.6 ms
-
-### With Partial Index
-```sql
-CREATE INDEX idx_outbox_events_pending
-ON ordering.outbox_events (created_at)
-WHERE status = 'PENDING';
+**6. The hot path**
 ```
-- **Plan:** `Limit (cost=0.28..4.12 rows=100 width=180)`  
-  `-> LockRows ...`  
-  `-> Index Scan using idx_outbox_events_pending on outbox_events`
-- **Execution Time:** **0.21 ms** (~136x speedup)
-- **Justification:** Published events never get touched by the poller. The partial index only contains unpublished rows, keeping index size virtually constant near zero.
-
----
-
-## 3. User Order History (Keyset Pagination)
-
-### Business Operation
-Fetching the user's latest orders:
-```sql
-SELECT id, reservation_id, status, total_amount, currency, created_at
-FROM ordering.orders
-WHERE user_id = '0192f5c4-7a1e-7c3b-9a55-2f1e4c8d9b10'
-ORDER BY created_at DESC, id
-LIMIT 20;
+Update on inventory (actual time=0.141..0.141 rows=0.00 loops=1)
+  ->  Index Scan using inventory_pkey on inventory
+        Index Cond: (product_id = '1f05c826-…'::uuid)
+        Filter: (available_quantity >= 1)
+Execution Time: 0.248 ms
 ```
+The statement is a primary-key lookup; its cost under contention is the wait for the row lock, not the plan
+(see [concurrency-strategies.md](concurrency-strategies.md)).
 
-### With Composite Index
-```sql
-CREATE INDEX idx_orders_user_created ON ordering.orders (user_id, created_at DESC, id);
+**7. Reconciliation**
 ```
-- **Plan:** `Index Scan using idx_orders_user_created on orders (cost=0.42..8.44 rows=5 width=88)`
-- **Execution Time:** **0.08 ms**
-- **Justification:** Eliminates in-memory Sort step entirely; provides index-only scan capabilities for user order history pagination.
-
----
-
-## 4. Hot Row Contention & Write Path
-
-### Hot Table: `inventory.inventory`
-- Indexes on `inventory`: Only Primary Key `(product_id)`.
-- **Deliberate decision:** No secondary indexes on `inventory`. Every additional index requires write amplification (WAL logging and B-Tree rebalancing on every atomic decrement). The critical section is kept to a single conditional statement:
-```sql
-UPDATE inventory.inventory
-SET available_quantity = available_quantity - :qty,
-    reserved_quantity = reserved_quantity + :qty,
-    updated_at = now()
-WHERE product_id = :productId AND available_quantity >= :qty;
+Hash Left Join (actual time=47.915..47.919 rows=0.00 loops=1)
+  Filter: (i.reserved_quantity <> COALESCE(p.pending, '0'::bigint))
+  ->  Seq Scan on inventory i  (rows=100036)
+  ->  Hash
+        ->  HashAggregate  Group Key: reservations.product_id
+              ->  Index Scan using idx_reservations_pending_expires_at on reservations  (rows=25000)
+Execution Time: 48.590 ms
 ```
-- **Latency:** **0.15 ms** on PK index lookup + in-place tuple update.
+A full pass over 100,000 products in under 50 ms, once a minute, in a `REPEATABLE READ` snapshot that does not block
+writers. The aggregation reuses the pending-only partial index instead of scanning half a million reservations.
+
+## Indexes deliberately not added
+- No index on `inventory.available_quantity`: the hot table is updated on every reservation, and every extra index is
+  extra write work and a HOT-update blocker (spec §13).
+- No index on `outbox_events.created_at` for published rows beyond `outbox_events_published_idx`, which only serves
+  the retention job.
