@@ -47,10 +47,10 @@
         <!-- Versions not managed by Spring Boot. gRPC, protobuf, Testcontainers, Awaitility and
              OpenTelemetry versions come from the Spring Boot BOM so every module agrees on them. -->
         <archunit.version>1.5.1</archunit.version>
-        <springdoc.version>3.1.1</springdoc.version>
-        <spotless.version>3.10.3</spotless.version>
+        <springdoc.version>3.2.0</springdoc.version>
+        <spotless.version>3.10.4</spotless.version>
         <palantir-java-format.version>2.102.0</palantir-java-format.version>
-        <jacoco.version>0.8.15</jacoco.version>
+        <jacoco.version>0.8.16</jacoco.version>
         <errorprone.version>2.50.0</errorprone.version>
         <resilience4j.version>2.4.0</resilience4j.version>
         <jqwik.version>1.10.2</jqwik.version>
