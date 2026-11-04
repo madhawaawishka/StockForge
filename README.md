@@ -157,15 +157,6 @@ Open your browser to:
 
 Click **Run Step 1** through **Run Step 8** inside the accordion to experience the full operational flow!
 
----
-
-## 🛠️ Fast Incremental Rebuilding (No `docker compose down` Needed!)
-
-> [!TIP]
-> **You NEVER need to run `docker compose down` when you modify application code!**
-> Running `down` stops all containers, tears down Docker networks, and running `down -v` wipes your test databases and Kafka state.
-
-Instead, use standard incremental rebuilds:
 
 ### Option A: Rebuild ONLY the single service you modified (FASTEST — 5 to 15 seconds)
 If you only changed code in one microservice (e.g. `api-gateway`, `inventory-service`, `order-service`):
