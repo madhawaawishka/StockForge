@@ -1025,8 +1025,42 @@
     // Initial Startup
     window.addEventListener('DOMContentLoaded', async () => {
       generateNewIdempotencyKey();
-      await switchUser('admin');
-      await loadProductCatalog();
+      if (window.location.search.includes('view=demo')) {
+        await switchUser('alice');
+        await loadProductCatalog();
+        const sel = document.getElementById('selProduct');
+        for (let i = 0; i < sel.options.length; i++) {
+          if (sel.options[i].textContent.includes('Pro Edition Sneaker 99')) {
+            sel.selectedIndex = i;
+            break;
+          }
+        }
+        await onProductSelected();
+        
+        document.getElementById('dispResId').textContent = "01a1a74a-7e18-70db-843e-ae127ce18d1a";
+        document.getElementById('lblResExpires').textContent = new Date(Date.now() + 600000).toLocaleTimeString();
+        document.getElementById('activeReservationBanner').classList.remove('hidden');
+        updateSagaPipeline(4, "CONFIRMED");
+        
+        renderOrderAuditHistory([
+          { fromStatus: null, toStatus: "PENDING_PAYMENT", reason: "Order placed via saga", occurredAt: new Date(Date.now() - 32000).toISOString() },
+          { fromStatus: "PENDING_PAYMENT", toStatus: "CONFIRMED", reason: "Payment authorized (Kafka outbox/inbox)", occurredAt: new Date(Date.now() - 28000).toISOString() }
+        ]);
+        
+        clearConsoleLogs();
+        logConsole("POST", "/api/v1/admin/products", 201, 14);
+        logConsole("GET", "/api/v1/products/01a1a74a-7e18/availability", 200, 4);
+        logConsole("GET", '/api/v1/products/01a1a74a-7e18/availability <span class="text-blue-400">[ETag: "w-01a1a7"]</span>', 304, 2);
+        logConsole("POST", '/api/v1/reservations <span class="text-indigo-300">[Idempotency-Key: idem-a8f1]</span>', 201, 19);
+        logConsole("POST", '/api/v1/reservations <span class="text-emerald-400">[Idempotent-Replayed: true]</span>', 201, 5);
+        logConsole("POST", '/api/v1/orders <span class="text-slate-400">[Location: /api/v1/orders/01a1a74a-ord1]</span>', 202, 24);
+        logConsole("KAFKA", 'Event published: <strong>order.created</strong> ➔ topic: <strong>order-events</strong>', null);
+        logConsole("GET", '/api/v1/orders/01a1a74a-ord1 - Status: <strong class="text-emerald-400">CONFIRMED</strong>', 200, 7);
+        logConsole("BURST", '15 parallel buyers: <strong class="text-emerald-400">10 Won (201)</strong>, <strong class="text-amber-400">5 Lost (409)</strong>, <strong>0 Oversold!</strong>', 200, 48);
+      } else {
+        await switchUser('admin');
+        await loadProductCatalog();
+      }
     });
   </script>
 </body>
