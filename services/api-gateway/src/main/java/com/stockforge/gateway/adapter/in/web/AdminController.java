@@ -3,6 +3,7 @@ package com.stockforge.gateway.adapter.in.web;
 import com.stockforge.gateway.application.AdminUseCases;
 import com.stockforge.gateway.domain.model.Views;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -39,23 +40,42 @@ class AdminController {
     }
 
     record MoneyBody(
-            @NotBlank @Pattern(regexp = "\\d{1,15}(\\.\\d{1,4})?", message = "must be a decimal amount")
+            @Schema(example = "119.00", description = "Monetary amount with at most 2 decimal places")
+            @NotBlank
+            @Pattern(regexp = "\\d{1,15}(\\.\\d{1,4})?", message = "must be a decimal amount")
             String amount,
 
-            @NotBlank @Pattern(regexp = "[A-Z]{3}", message = "must be an ISO 4217 code")
+            @Schema(example = "USD", description = "3-letter ISO 4217 currency code")
+            @NotBlank
+            @Pattern(regexp = "[A-Z]{3}", message = "must be an ISO 4217 code")
             String currency) {}
 
     record CreateProductBody(
-            @NotBlank @Pattern(regexp = "[A-Z0-9][A-Z0-9-]{2,63}")
+            @Schema(example = "SNEAKER-LIMITED-42", description = "Product SKU (letters, numbers, hyphens)")
+            @NotBlank
+            @Pattern(regexp = "[A-Z0-9][A-Z0-9-]{2,63}")
             String sku,
 
-            @NotBlank @Size(max = 200) String name,
+            @Schema(example = "Limited edition running sneaker", description = "Product name")
+            @NotBlank
+            @Size(max = 200)
+            String name,
+
             @NotNull @Valid MoneyBody price,
-            @Min(0) @Max(1_000_000) int initialStock) {}
+
+            @Schema(example = "100", description = "Initial stock quantity") @Min(0) @Max(1_000_000)
+            int initialStock) {}
 
     record StockAdjustmentBody(
-            @Min(-1_000_000) @Max(1_000_000) int delta,
-            @NotBlank @Size(max = 500) String reason) {}
+            @Schema(example = "50", description = "Stock adjustment delta (positive to add, negative to write off)")
+            @Min(-1_000_000)
+            @Max(1_000_000)
+            int delta,
+
+            @Schema(example = "Warehouse restock batch A", description = "Reason for adjustment")
+            @NotBlank
+            @Size(max = 500)
+            String reason) {}
 
     @PostMapping("/products")
     @Operation(summary = "Create a product with its initial stock")

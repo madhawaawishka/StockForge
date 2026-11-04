@@ -3,6 +3,7 @@ package com.stockforge.gateway.adapter.in.web;
 import com.stockforge.gateway.application.StorefrontUseCases;
 import com.stockforge.gateway.domain.model.Views;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -46,9 +47,15 @@ class ShopperController {
     }
 
     record ReserveRequest(
-            @NotNull UUID productId, @Min(1) @Max(100) int quantity) {}
+            @Schema(example = "0192f5c4-6b0d-7e21-8f43-1a2b3c4d5e6f", description = "Product UUID") @NotNull
+            UUID productId,
 
-    record PlaceOrderRequest(@NotNull UUID reservationId) {}
+            @Schema(example = "1", description = "Quantity to reserve (1-100)") @Min(1) @Max(100)
+            int quantity) {}
+
+    record PlaceOrderRequest(
+            @Schema(example = "0192f5c4-6b0d-7e21-8f43-1a2b3c4d5e7a", description = "Reservation UUID") @NotNull
+            UUID reservationId) {}
 
     @PostMapping("/reservations")
     @Operation(
