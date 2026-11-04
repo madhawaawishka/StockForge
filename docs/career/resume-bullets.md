@@ -28,6 +28,18 @@ gRPC, Docker, Terraform (AWS) · github.com/madhawaawishka/StockForge
   covered by `promtool` unit tests**, Grafana dashboards and runbooks; shipped non-root, read-only container images and
   a validated Terraform design for ECS Fargate, RDS, ElastiCache and MSK.
 
+## Role-specific optional bullets (swap in depending on target role)
+
+- **API Security & Resilience:** Defended against **Broken Object-Level Authorization (BOLA / OWASP API #1)** by enforcing
+  domain ownership checks returning `404 Not Found` (preventing ID enumeration), and implemented distributed token-bucket
+  rate limiting via Redis/Lua scripted to fail open under outage.
+- **Data Integrity & Invariants:** Prevented concurrent **write skew on per-user purchase limits** via atomic counter rows
+  and PostgreSQL CHECK constraints (`available + reserved + sold = total`); validated invariant preservation across
+  randomized operation sequences with **jqwik property-based tests**.
+- **Software Architecture & Clean Code:** Enforced strict **Hexagonal Architecture across 5 services with ArchUnit CI rules**,
+  schema-per-service database isolation, time-ordered **UUIDv7** primary keys for B-tree index locality, and Spring Data JDBC
+  with explicit SQL to eliminate ORM overhead.
+
 ## Shorter variant (three lines)
 - Built a 5-service flash-sale platform (Java 21, Spring Boot, PostgreSQL, Kafka, Redis) that sold exactly 500/500
   units to 5,000 concurrent buyers with zero oversell and a 119–254 ms P99, using atomic conditional updates.
@@ -43,3 +55,6 @@ gRPC, Docker, Terraform (AWS) · github.com/madhawaawishka/StockForge
   row in the first second of the sale) and what you would do (gateway-side sold-out flag).
 - "5 microservices" — gateway, inventory, order, payment, notification. Be ready to argue why that split, and why not
   fewer (ADR-002, ADR-007).
+- If using the **BOLA bullet**: Know why `404 Not Found` was returned instead of `403 Forbidden` (OWASP API Top 10 recommendation; avoids confirming object existence to an attacker scanning IDs).
+- If using the **Write Skew bullet**: Know why READ COMMITTED allows write skew on multi-row inserts (`SELECT SUM ... INSERT`), and how the single counter row with a conditional update and DB CHECK constraint closes it (`PurchaseLimitWriteSkewIT`).
+- If using the **Architecture bullet**: Know why Spring Data JDBC was chosen over JPA/Hibernate (ADR-003: explicit SQL control, zero dirty-checking or session overhead, and preventing ORM connections from being held during contention).
