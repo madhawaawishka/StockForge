@@ -10,6 +10,7 @@ When the stack is running, open these URLs in your web browser:
 
 | Portal / Tool | URL | Default Credentials / Purpose |
 | :--- | :--- | :--- |
+| **Interactive Web Demo Dashboard** | [http://localhost:8088/](http://localhost:8088/) | Complete interactive showcase: User switcher (Admin/Alice/Bob), live stock bars, saga tracker, and 8-step demo accordion |
 | **Swagger UI (OpenAPI)** | [http://localhost:8088/swagger-ui.html](http://localhost:8088/swagger-ui.html) | Interactive REST API tester & documentation (port 8088 via `.env`) |
 | **Grafana** | [http://localhost:3000](http://localhost:3000) | Anonymous Admin. Pre-built *StockForge* dashboards |
 | **Prometheus** | [http://localhost:9090](http://localhost:9090) | Alerts & SLO recording rules at `/alerts` |
@@ -47,6 +48,45 @@ docker compose --profile apps --profile tools down
 
 ---
 
+### Fast Rebuilding When You Change Code (Do I need `docker compose down`?)
+
+> [!TIP]
+> **NO, you NEVER need to run `docker compose down` just because you modified application code!**
+> Running `down` stops all containers, tears down Docker networks, and if `-v` is accidentally passed, wipes your PostgreSQL database, Redis caches, and Kafka topics.
+
+Instead, use one of the two standard incremental rebuild approaches:
+
+#### Approach 1: Rebuild ONLY the single service you modified (FASTEST — 5 to 15 seconds)
+If you only changed code in one service (e.g. `api-gateway`, `inventory-service`, `order-service`, `payment-service`, or `notification-worker`):
+```bash
+# Rebuilds and restarts ONLY the modified service container:
+docker compose --profile apps up -d --build <service-name>
+
+# Examples:
+docker compose --profile apps up -d --build api-gateway
+docker compose --profile apps up -d --build inventory-service
+```
+*(Postgres, Redis, Kafka, Grafana, and all other microservices remain completely running without losing any state or data!)*
+
+#### Approach 2: Rebuild all services that have code changes
+If you modified shared libraries (`libs/proto`, `libs/outbox-starter`) or multiple services:
+```bash
+docker compose --profile apps --profile tools up -d --build --wait
+```
+Docker Compose checks build caches, detects which layers changed, rebuilds only the affected container images, and restarts only the updated containers. Unmodified containers (like PostgreSQL and Redis) remain untouched.
+
+#### When is `docker compose down` actually needed?
+- **Only when you want to stop background processes** to free up CPU and RAM when you're done working:
+  ```bash
+  docker compose --profile apps --profile tools down
+  ```
+- **Or when you want to wipe database test state** and start completely fresh from scratch:
+  ```bash
+  docker compose --profile apps --profile tools down -v
+  ```
+
+---
+
 ## 3. Generating JWT Authentication Tokens
 
 StockForge secures APIs with JWTs signed with a local HMAC development key. Use [`scripts/dev-token.py`](scripts/dev-token.py) to mint tokens instantly:
@@ -54,11 +94,11 @@ StockForge secures APIs with JWTs signed with a local HMAC development key. Use 
 ### In PowerShell:
 ```powershell
 # Admin token (for creating products, stock adjustments, DLT replay)
-$ADMIN 
+$ADMIN = python scripts/dev-token.py --admin
 
 # Customer/Shopper tokens (Alice and Bob)
-$ALICE
-$BOB   
+$ALICE = python scripts/dev-token.py
+$BOB   = python scripts/dev-token.py
 ```
 
 ### In Git Bash:
@@ -71,6 +111,47 @@ BOB=$(python scripts/dev-token.py)
 ---
 
 ## 4. Hands-On API Activities
+
+### Activity 0: Interactive Web Showcase (The 1-Click Recommended Demo)
+
+There are 3 convenient ways to open and run the interactive HTML dashboard:
+
+* **Method 1: Direct via Gateway (Recommended — Zero Setup)**
+  With the Docker stack running, open your web browser to:
+  👉 **[http://localhost:8088/](http://localhost:8088/)**
+  The Spring Boot API Gateway automatically serves the static dashboard directly with pre-configured CORS and security headers.
+
+* **Method 2: Open `web/index.html` Directly from Windows Explorer / Browser**
+  Double-click [`web/index.html`](web/index.html) or open `file:///c:/Users/Madhawa/Desktop/Dev/StockForge/web/index.html` in Chrome or Edge.
+  The dashboard automatically detects that it is running locally and points all API calls to `http://localhost:8088`.
+
+* **Method 3: VS Code Live Server / Local Web Server**
+  Right-click `web/index.html` in VS Code and select **"Open with Live Server"** (or run `python -m http.server 3000` inside the `web` folder). The dashboard connects directly to the gateway at `http://localhost:8088`.
+
+#### Key Features Built into the Web Interface:
+1. **Zero-Configuration Caller Switching**:
+   - Switch callers in one click between **Admin** (`ROLE_ADMIN`), **Alice** (Shopper 1), **Bob** (Shopper 2), or generate a **Random New User**.
+   - Client-side WebCrypto automatically signs valid HMAC-SHA256 JWT tokens using the development secret—no terminal commands required!
+   - Includes a **Copy JWT** button to copy the active token for testing in Swagger UI or curl.
+2. **Interactive 8-Step Demo Sequence (Accordion Checklist)**:
+   - Expand the **Interactive Guided Demo Sequence** accordion at the top of the page.
+   - Click each step sequentially (**Run Step 1** through **Run Step 8**) to demonstrate all distributed systems and backend capabilities:
+     - **Step 1 — Create Flash-Sale Product (Admin)**: Mints UUIDv7 product with stock conservation invariants (`available + reserved + sold = total`).
+     - **Step 2 — Check Availability & ETag Caching (Alice)**: Performs conditional GET with `If-None-Match` to demonstrate Redis single-flight caching and `304 Not Modified`.
+     - **Step 3 — Reserve Stock Atomically (Alice)**: Issues an atomic conditional SQL update (`WHERE available_quantity >= qty`) with mandatory `Idempotency-Key`.
+     - **Step 4 — Verify At-Most-Once Idempotent Replay**: Re-sends the identical reservation payload. Confirms header `Idempotent-Replayed: true` and zero extra stock deduction.
+     - **Step 5 — Happy-Path Saga Checkout**: Submits order via `202 Accepted + Location`, triggers Kafka asynchronous saga, and watches the state machine advance to `CONFIRMED`.
+     - **Step 6 — Saga Failure & Automatic Compensation**: Injects `X-Payment-Simulation: FAILED`, triggers compensating transactions, transitions order to `CANCELLED`, restores stock to `AVAILABLE`, and fires a cancellation notification.
+     - **Step 7 — Broken Object-Level Authorization (BOLA Defense)**: Switches to Bob and attempts to read Alice's order. Shows that the gateway returns `404 Not Found` instead of `403`, preventing ID enumeration (OWASP API Top 10 #1).
+     - **Step 8 — High-Concurrency Flash-Sale Burst**: Fires 15 parallel simulated buyers competing for remaining stock via `Promise.all()`. Proves database row-locking prevents lost updates: winners get `201 Created`, losers get clean `409 Conflict`, and zero items are oversold.
+3. **Live Product & Stock Distribution Meter**:
+   - Visual multi-color bar displaying real-time allocation of Available (Green), Reserved (Yellow), and Sold (Indigo) quantities.
+4. **Saga State Machine Stepper & Audit History**:
+   - Real-time pipeline visualizer showing order progression and the full timestamped `order_status_history` audit trail.
+5. **Live Request & RFC 9457 Problem Details Console**:
+   - Displays real-time HTTP methods, paths, status codes, response headers, and problem details.
+
+---
 
 ### Activity A: Interactive Testing with Swagger UI
 1. Open [http://localhost:8088/swagger-ui.html](http://localhost:8088/swagger-ui.html).

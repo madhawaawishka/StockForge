@@ -74,12 +74,22 @@ class WebSecurityConfiguration {
                 request.getRequestURI(),
                 json,
                 activeTracer);
-        http.csrf(csrf -> csrf.disable()) // stateless bearer tokens: no cookies, no CSRF exposure
+        http.cors(cors -> cors.configurationSource(request -> {
+                    var config = new org.springframework.web.cors.CorsConfiguration();
+                    config.setAllowedOriginPatterns(List.of("*"));
+                    config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"));
+                    config.setAllowedHeaders(List.of("*"));
+                    config.setExposedHeaders(List.of("Location", "Idempotent-Replayed", "ETag", "Retry-After"));
+                    return config;
+                }))
+                .csrf(csrf -> csrf.disable()) // stateless bearer tokens: no cookies, no CSRF exposure
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(
                         auth -> auth.requestMatchers("/actuator/health/**", "/actuator/info", "/actuator/prometheus")
                                 .permitAll()
                                 .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html")
+                                .permitAll()
+                                .requestMatchers("/", "/index.html", "/favicon.ico", "/static/**")
                                 .permitAll()
                                 .requestMatchers(HttpMethod.GET, "/api/v1/products", "/api/v1/products/**")
                                 .permitAll()

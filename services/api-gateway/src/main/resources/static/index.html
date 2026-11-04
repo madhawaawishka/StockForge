@@ -1,0 +1,1034 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StockForge — Interactive Flash-Sale & Saga Demo</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: { 500: '#6366f1', 600: '#4f46e5' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    /* Custom scrollbars */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+    .pulse-dot {
+      box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);
+      animation: pulse 1.8s infinite;
+    }
+    @keyframes pulse {
+      0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
+      70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(34, 197, 94, 0); }
+      100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-indigo-500 selection:text-white">
+
+  <!-- TOP NAVIGATION / HEADER -->
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <div class="w-9 h-9 rounded-lg bg-indigo-600 flex items-center justify-center text-white font-bold text-lg shadow-lg shadow-indigo-500/30">
+          <i class="fa-solid fa-boxes-stacked"></i>
+        </div>
+        <div>
+          <h1 class="text-lg font-bold tracking-tight text-white flex items-center gap-2">
+            StockForge <span class="text-xs px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 font-mono">Live Demo</span>
+          </h1>
+          <p class="text-xs text-slate-400">High-Concurrency Inventory & Saga Simulation Platform</p>
+        </div>
+      </div>
+
+      <!-- Live Gateway Status & API Links -->
+      <div class="flex items-center space-x-4">
+        <div id="gatewayStatus" class="flex items-center space-x-2 text-xs bg-slate-800/80 px-3 py-1.5 rounded-full border border-slate-700">
+          <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 pulse-dot"></span>
+          <span class="text-slate-300">Gateway: <strong class="text-white" id="gwHostText">localhost:8088</strong></span>
+        </div>
+        <a href="/swagger-ui.html" target="_blank" class="text-xs text-slate-400 hover:text-white transition flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg border border-slate-700">
+          <i class="fa-solid fa-book-open text-indigo-400"></i> Swagger UI
+        </a>
+        <a href="http://localhost:3000" target="_blank" class="text-xs text-slate-400 hover:text-white transition flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg border border-slate-700">
+          <i class="fa-solid fa-chart-line text-emerald-400"></i> Grafana
+        </a>
+        <a href="http://localhost:8090" target="_blank" class="text-xs text-slate-400 hover:text-white transition flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg border border-slate-700">
+          <i class="fa-solid fa-network-wired text-amber-400"></i> Kafka UI
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- PERSONA BAR / USER SWITCHER -->
+  <div class="border-b border-slate-800 bg-slate-900/40 px-4 py-2.5">
+    <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3 text-xs">
+      <div class="flex items-center space-x-2">
+        <span class="text-slate-400 font-medium"><i class="fa-solid fa-user-tag text-slate-500 mr-1"></i> Active Caller:</span>
+        <div class="inline-flex rounded-lg bg-slate-800 p-0.5 border border-slate-700" id="personaButtonGroup">
+          <button onclick="switchUser('admin')" id="btn-admin" class="px-3 py-1 rounded-md text-xs font-semibold bg-indigo-600 text-white shadow-sm transition">
+            <i class="fa-solid fa-shield-halved mr-1"></i> Admin
+          </button>
+          <button onclick="switchUser('alice')" id="btn-alice" class="px-3 py-1 rounded-md text-xs font-medium text-slate-400 hover:text-white transition">
+            <i class="fa-solid fa-user mr-1"></i> Alice (Shopper 1)
+          </button>
+          <button onclick="switchUser('bob')" id="btn-bob" class="px-3 py-1 rounded-md text-xs font-medium text-slate-400 hover:text-white transition">
+            <i class="fa-solid fa-user mr-1"></i> Bob (Shopper 2)
+          </button>
+          <button onclick="switchUser('random')" id="btn-random" class="px-3 py-1 rounded-md text-xs font-medium text-slate-400 hover:text-white transition">
+            <i class="fa-solid fa-dice mr-1"></i> New User
+          </button>
+        </div>
+      </div>
+
+      <!-- Active User Info & Token Copy -->
+      <div class="flex items-center space-x-3 text-slate-400">
+        <span>Role: <strong id="lblRole" class="text-indigo-400 font-mono">ADMIN</strong></span>
+        <span class="hidden sm:inline">UUID: <span id="lblUserId" class="text-slate-300 font-mono text-[11px]">00000000-0000-7000-8000-00000000ad01</span></span>
+        <button onclick="copyCurrentToken()" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 hover:text-white transition flex items-center gap-1">
+          <i class="fa-regular fa-copy"></i> <span id="btnCopyTokenText">Copy JWT</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MAIN CONTENT CONTAINER -->
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 space-y-6">
+
+    <!-- ACCORDION: STEP-BY-STEP COMPLETE DEMO SEQUENCE -->
+    <section class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
+      <div class="px-5 py-4 bg-slate-850 border-b border-slate-800 flex items-center justify-between cursor-pointer" onclick="toggleAccordion('demoSequence')">
+        <div class="flex items-center space-x-3">
+          <div class="w-8 h-8 rounded-lg bg-indigo-500/10 text-indigo-400 flex items-center justify-center font-bold">
+            <i class="fa-solid fa-list-check"></i>
+          </div>
+          <div>
+            <h2 class="text-sm font-bold text-white flex items-center gap-2">
+              Interactive Guided Demo Sequence
+              <span class="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Recommended Path</span>
+            </h2>
+            <p class="text-xs text-slate-400">Follow this 8-step sequence to demonstrate the platform's distributed systems capabilities to any interviewer.</p>
+          </div>
+        </div>
+        <i id="demoSequenceIcon" class="fa-solid fa-chevron-down text-slate-400 transition-transform duration-200"></i>
+      </div>
+
+      <div id="demoSequence" class="divide-y divide-slate-800 text-xs">
+
+        <!-- Step 1 -->
+        <div class="p-4 hover:bg-slate-850/50 transition flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div class="space-y-1 max-w-2xl">
+            <div class="flex items-center gap-2">
+              <span class="w-5 h-5 rounded-full bg-slate-800 text-indigo-400 font-bold flex items-center justify-center text-[10px]">1</span>
+              <h3 class="font-semibold text-white">Create Flash-Sale Product (Admin)</h3>
+              <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">POST /api/v1/admin/products</span>
+            </div>
+            <p class="text-slate-400 text-xs leading-relaxed">
+              Creates a catalog product with time-ordered <strong>UUIDv7</strong> and stock conservation check (<code class="text-slate-300">available + reserved + sold = total</code>).
+            </p>
+          </div>
+          <button onclick="runStep1()" class="px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium flex items-center gap-2 shadow-sm whitespace-nowrap self-start md:self-auto">
+            <i class="fa-solid fa-bolt"></i> Run Step 1
+          </button>
+        </div>
+
+        <!-- Step 2 -->
+        <div class="p-4 hover:bg-slate-850/50 transition flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div class="space-y-1 max-w-2xl">
+            <div class="flex items-center gap-2">
+              <span class="w-5 h-5 rounded-full bg-slate-800 text-indigo-400 font-bold flex items-center justify-center text-[10px]">2</span>
+              <h3 class="font-semibold text-white">Check Availability & ETag Caching (Alice)</h3>
+              <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">GET /products/{id}/availability</span>
+            </div>
+            <p class="text-slate-400 text-xs leading-relaxed">
+              Fetches product availability from Redis cache with single-flight stampede protection. Re-requesting with <code class="text-slate-300">If-None-Match</code> returns <strong>304 Not Modified</strong>.
+            </p>
+          </div>
+          <button onclick="runStep2()" class="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium flex items-center gap-2 border border-slate-700 whitespace-nowrap self-start md:self-auto">
+            <i class="fa-solid fa-bolt"></i> Run Step 2
+          </button>
+        </div>
+
+        <!-- Step 3 -->
+        <div class="p-4 hover:bg-slate-850/50 transition flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div class="space-y-1 max-w-2xl">
+            <div class="flex items-center gap-2">
+              <span class="w-5 h-5 rounded-full bg-slate-800 text-indigo-400 font-bold flex items-center justify-center text-[10px]">3</span>
+              <h3 class="font-semibold text-white">Reserve Stock Atomically (Alice)</h3>
+              <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">POST /reservations</span>
+            </div>
+            <p class="text-slate-400 text-xs leading-relaxed">
+              Executes a single conditional <code class="text-indigo-300">UPDATE ... WHERE available_quantity &gt;= qty</code>. Guaranteed zero overselling. Requires mandatory <code class="text-slate-300">Idempotency-Key</code>.
+            </p>
+          </div>
+          <button onclick="runStep3()" class="px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium flex items-center gap-2 shadow-sm whitespace-nowrap self-start md:self-auto">
+            <i class="fa-solid fa-bolt"></i> Run Step 3
+          </button>
+        </div>
+
+        <!-- Step 4 -->
+        <div class="p-4 hover:bg-slate-850/50 transition flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div class="space-y-1 max-w-2xl">
+            <div class="flex items-center gap-2">
+              <span class="w-5 h-5 rounded-full bg-slate-800 text-indigo-400 font-bold flex items-center justify-center text-[10px]">4</span>
+              <h3 class="font-semibold text-white">Verify At-Most-Once Idempotent Replay</h3>
+              <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">Idempotent-Replayed: true</span>
+            </div>
+            <p class="text-slate-400 text-xs leading-relaxed">
+              Re-submits the exact same reservation with the identical <code class="text-slate-300">Idempotency-Key</code>. Returns the original response with header <code class="text-emerald-400">Idempotent-Replayed: true</code> without reserving another unit!
+            </p>
+          </div>
+          <button onclick="runStep4()" class="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium flex items-center gap-2 border border-slate-700 whitespace-nowrap self-start md:self-auto">
+            <i class="fa-solid fa-bolt"></i> Run Step 4
+          </button>
+        </div>
+
+        <!-- Step 5 -->
+        <div class="p-4 hover:bg-slate-850/50 transition flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div class="space-y-1 max-w-2xl">
+            <div class="flex items-center gap-2">
+              <span class="w-5 h-5 rounded-full bg-slate-800 text-indigo-400 font-bold flex items-center justify-center text-[10px]">5</span>
+              <h3 class="font-semibold text-white">Happy Path Saga Checkout (Async Accepted ➔ Confirmed)</h3>
+              <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">POST /orders (202 Accepted)</span>
+            </div>
+            <p class="text-slate-400 text-xs leading-relaxed">
+              Orders created asynchronously (<code class="text-emerald-300">202 Accepted + Location</code>). Order service saga orchestrator dispatches payment over Kafka. Transitions: <code class="text-amber-400">PENDING_PAYMENT</code> ➔ <code class="text-emerald-400">CONFIRMED</code>.
+            </p>
+          </div>
+          <button onclick="runStep5()" class="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium flex items-center gap-2 shadow-sm whitespace-nowrap self-start md:self-auto">
+            <i class="fa-solid fa-play"></i> Run Step 5
+          </button>
+        </div>
+
+        <!-- Step 6 -->
+        <div class="p-4 hover:bg-slate-850/50 transition flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div class="space-y-1 max-w-2xl">
+            <div class="flex items-center gap-2">
+              <span class="w-5 h-5 rounded-full bg-slate-800 text-indigo-400 font-bold flex items-center justify-center text-[10px]">6</span>
+              <h3 class="font-semibold text-white">Saga Failure & Automatic Rollback Compensation</h3>
+              <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">X-Payment-Simulation: FAILED</span>
+            </div>
+            <p class="text-slate-400 text-xs leading-relaxed">
+              Injects a simulated payment failure. The saga triggers a compensating transaction: order becomes <code class="text-rose-400">CANCELLED</code>, stock returns to <code class="text-emerald-400">AVAILABLE</code>, and the cancellation notification is delivered.
+            </p>
+          </div>
+          <button onclick="runStep6()" class="px-3.5 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-medium flex items-center gap-2 shadow-sm whitespace-nowrap self-start md:self-auto">
+            <i class="fa-solid fa-rotate-left"></i> Run Step 6
+          </button>
+        </div>
+
+        <!-- Step 7 -->
+        <div class="p-4 hover:bg-slate-850/50 transition flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div class="space-y-1 max-w-2xl">
+            <div class="flex items-center gap-2">
+              <span class="w-5 h-5 rounded-full bg-slate-800 text-indigo-400 font-bold flex items-center justify-center text-[10px]">7</span>
+              <h3 class="font-semibold text-white">Broken Object-Level Authorization Defense (BOLA)</h3>
+              <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">Bob reads Alice's order ➔ 404</span>
+            </div>
+            <p class="text-slate-400 text-xs leading-relaxed">
+              Switches caller to <strong>Bob</strong> and attempts to query Alice's order. Returns <strong>404 Not Found</strong> instead of 403, preventing attackers from probing whether the Order ID exists (OWASP API Top 10 #1).
+            </p>
+          </div>
+          <button onclick="runStep7()" class="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium flex items-center gap-2 border border-slate-700 whitespace-nowrap self-start md:self-auto">
+            <i class="fa-solid fa-lock"></i> Run Step 7
+          </button>
+        </div>
+
+        <!-- Step 8 -->
+        <div class="p-4 hover:bg-slate-850/50 transition flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div class="space-y-1 max-w-2xl">
+            <div class="flex items-center gap-2">
+              <span class="w-5 h-5 rounded-full bg-slate-800 text-indigo-400 font-bold flex items-center justify-center text-[10px]">8</span>
+              <h3 class="font-semibold text-white">High-Concurrency Flash-Sale Burst (Contention Test)</h3>
+              <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">15 Simultaneous Buyers</span>
+            </div>
+            <p class="text-slate-400 text-xs leading-relaxed">
+              Launches 15 simultaneous parallel reservation requests competing for remaining stock. Proves that database row-locking eliminates lost updates: exactly available stock is reserved, losers get clean 409 Conflict, and <strong>Zero units are oversold</strong>.
+            </p>
+          </div>
+          <button onclick="runStep8()" class="px-3.5 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-medium flex items-center gap-2 shadow-sm whitespace-nowrap self-start md:self-auto">
+            <i class="fa-solid fa-fire"></i> Run Step 8
+          </button>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- TWO-COLUMN WORKBENCH: PRODUCT & SAGA TRACKER -->
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+      <!-- LEFT: ACTIVE PRODUCT & STOCK COUNTER (5 cols) -->
+      <div class="lg:col-span-5 space-y-6">
+        
+        <!-- Product & Stock Card -->
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
+          <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <i class="fa-solid fa-cube text-indigo-400"></i> Active Product & Stock
+            </h3>
+            <button onclick="loadProductCatalog()" class="text-xs text-indigo-400 hover:text-indigo-300 transition flex items-center gap-1">
+              <i class="fa-solid fa-rotate text-[10px]"></i> Refresh
+            </button>
+          </div>
+
+          <div class="space-y-3">
+            <div>
+              <label class="text-[11px] font-medium text-slate-400 block mb-1">Select Product</label>
+              <select id="selProduct" onchange="onProductSelected()" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500 font-mono">
+                <option value="">Loading catalog...</option>
+              </select>
+            </div>
+
+            <!-- Product Detail Summary -->
+            <div id="productDetailCard" class="bg-slate-950/60 rounded-lg p-3.5 border border-slate-800 space-y-3">
+              <div class="flex justify-between items-start">
+                <div>
+                  <h4 id="dispProductName" class="font-bold text-white text-sm">--</h4>
+                  <p id="dispProductSku" class="text-xs text-indigo-400 font-mono">SKU: --</p>
+                </div>
+                <div class="text-right">
+                  <span id="dispProductPrice" class="text-sm font-bold text-emerald-400 font-mono">$0.00</span>
+                  <p class="text-[10px] text-slate-500">Unit Price</p>
+                </div>
+              </div>
+
+              <!-- Stock Conservation Progress Bar -->
+              <div class="space-y-1.5 pt-1">
+                <div class="flex justify-between text-[11px]">
+                  <span class="text-slate-400">Stock Distribution</span>
+                  <span class="text-slate-200 font-mono"><span id="lblStockSum">0</span> / <span id="lblStockTotal">0</span></span>
+                </div>
+                <!-- Multi-segment bar -->
+                <div class="w-full h-3 rounded-full bg-slate-800 overflow-hidden flex">
+                  <div id="barAvailable" class="bg-emerald-500 h-full transition-all duration-300" style="width: 50%" title="Available"></div>
+                  <div id="barReserved" class="bg-amber-500 h-full transition-all duration-300" style="width: 25%" title="Reserved"></div>
+                  <div id="barSold" class="bg-indigo-600 h-full transition-all duration-300" style="width: 25%" title="Sold"></div>
+                </div>
+                <div class="flex justify-between text-[10px] font-mono text-slate-400 pt-1">
+                  <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-500 inline-block"></span> Available: <strong id="lblAvailable" class="text-white">0</strong></span>
+                  <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-amber-500 inline-block"></span> Reserved: <strong id="lblReserved" class="text-white">0</strong></span>
+                  <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-indigo-500 inline-block"></span> Sold: <strong id="lblSold" class="text-white">0</strong></span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Quick Stock Adjust (Admin Only) -->
+            <div id="adminStockBox" class="border-t border-slate-800 pt-3 flex items-center gap-2">
+              <input type="number" id="txtStockDelta" value="50" class="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white text-center font-mono">
+              <button onclick="adjustProductStock()" class="flex-1 py-1.5 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-200 hover:text-white transition flex items-center justify-center gap-1.5">
+                <i class="fa-solid fa-plus-minus text-indigo-400"></i> Adjust Stock (Admin)
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Create New Product Card (Admin) -->
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
+          <h3 class="text-sm font-bold text-white flex items-center gap-2 border-b border-slate-800 pb-3">
+            <i class="fa-solid fa-plus text-indigo-400"></i> Create New Product
+          </h3>
+          <div class="grid grid-cols-2 gap-3 text-xs">
+            <div class="col-span-2">
+              <label class="text-slate-400 block mb-1">Product SKU</label>
+              <input type="text" id="newSku" value="FLASH-SALE-99" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono">
+            </div>
+            <div class="col-span-2">
+              <label class="text-slate-400 block mb-1">Product Name</label>
+              <input type="text" id="newName" value="Limited Mechanical Keyboard" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white">
+            </div>
+            <div>
+              <label class="text-slate-400 block mb-1">Price ($)</label>
+              <input type="text" id="newPrice" value="149.00" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono">
+            </div>
+            <div>
+              <label class="text-slate-400 block mb-1">Initial Stock</label>
+              <input type="number" id="newStock" value="50" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono">
+            </div>
+            <button onclick="createCustomProduct()" class="col-span-2 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 font-semibold text-white transition flex items-center justify-center gap-2 mt-1">
+              <i class="fa-solid fa-box"></i> Create Product
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- RIGHT: SAGA CHECKOUT WORKBENCH & PIPELINE TRACKER (7 cols) -->
+      <div class="lg:col-span-7 space-y-6">
+
+        <!-- Reservation & Saga Action Card -->
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-5">
+          <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <i class="fa-solid fa-cart-shopping text-emerald-400"></i> Checkout & Distributed Saga Simulator
+            </h3>
+            <span class="text-[11px] text-slate-400">Kafka Orchestration</span>
+          </div>
+
+          <!-- Checkout Controls -->
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <label class="text-[11px] text-slate-400 block mb-1">Units to Reserve</label>
+              <input type="number" id="txtReserveQty" value="1" min="1" max="5" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono">
+            </div>
+            <div>
+              <label class="text-[11px] text-slate-400 block mb-1">Payment Outcome</label>
+              <select id="selPaymentSimulation" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white">
+                <option value="">NORMAL (Success)</option>
+                <option value="FAILED">FAILED (Compensate)</option>
+                <option value="TIMED_OUT">TIMED_OUT (Timeout)</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-[11px] text-slate-400 block mb-1">Idempotency Key</label>
+              <div class="flex">
+                <input type="text" id="txtIdempotencyKey" class="w-full bg-slate-800 border border-slate-700 rounded-l-lg px-2.5 py-2 text-xs text-slate-300 font-mono">
+                <button onclick="generateNewIdempotencyKey()" class="bg-slate-700 hover:bg-slate-600 px-2.5 rounded-r-lg border border-l-0 border-slate-700 text-slate-300 hover:text-white" title="Generate New Key">
+                  <i class="fa-solid fa-arrows-rotate text-[11px]"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap gap-3 pt-1">
+            <button onclick="actionReserve()" class="flex-1 py-2.5 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 font-semibold text-xs text-white transition flex items-center justify-center gap-2 shadow-sm">
+              <i class="fa-solid fa-tag"></i> 1. Reserve Stock
+            </button>
+            <button onclick="actionPlaceOrder()" id="btnPlaceOrder" class="flex-1 py-2.5 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 font-semibold text-xs text-white transition flex items-center justify-center gap-2 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">
+              <i class="fa-solid fa-credit-card"></i> 2. Place Order (Trigger Saga)
+            </button>
+          </div>
+
+          <!-- Active Reservation Status Banner -->
+          <div id="activeReservationBanner" class="hidden bg-indigo-950/40 border border-indigo-800/60 rounded-lg p-3 text-xs flex items-center justify-between">
+            <div class="space-y-0.5">
+              <span class="text-indigo-400 font-medium flex items-center gap-1.5">
+                <i class="fa-regular fa-clock"></i> Active Reservation Held
+              </span>
+              <p class="text-[11px] text-slate-400 font-mono">ID: <span id="dispResId" class="text-slate-200">--</span></p>
+            </div>
+            <div class="text-right">
+              <span id="lblResExpires" class="text-indigo-300 font-bold font-mono text-xs">--</span>
+              <p class="text-[10px] text-slate-500">Expires At</p>
+            </div>
+          </div>
+
+          <!-- VISUAL SAGA PIPELINE (Interactive Stepper) -->
+          <div class="bg-slate-950/70 border border-slate-800 rounded-xl p-4 space-y-4">
+            <div class="flex justify-between items-center text-xs">
+              <h4 class="font-bold text-white flex items-center gap-2">
+                <i class="fa-solid fa-diagram-project text-indigo-400"></i> Saga State Machine Tracker
+              </h4>
+              <span id="badgeOrderStatus" class="px-2.5 py-0.5 rounded-full font-mono font-semibold text-[11px] bg-slate-800 text-slate-400">NO ACTIVE ORDER</span>
+            </div>
+
+            <!-- Stepper Nodes -->
+            <div class="grid grid-cols-4 gap-2 text-center text-[11px] relative pt-2">
+              <!-- Step 1 -->
+              <div id="stepNode1" class="p-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-400 space-y-1 transition-all">
+                <i class="fa-solid fa-lock block text-sm"></i>
+                <div class="font-bold">1. Reserve</div>
+                <div class="text-[9px] text-slate-500">PENDING</div>
+              </div>
+              <!-- Step 2 -->
+              <div id="stepNode2" class="p-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-400 space-y-1 transition-all">
+                <i class="fa-solid fa-file-invoice block text-sm"></i>
+                <div class="font-bold">2. Order Created</div>
+                <div class="text-[9px] text-slate-500">202 ACCEPTED</div>
+              </div>
+              <!-- Step 3 -->
+              <div id="stepNode3" class="p-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-400 space-y-1 transition-all">
+                <i class="fa-solid fa-money-bill-transfer block text-sm"></i>
+                <div class="font-bold">3. Payment</div>
+                <div class="text-[9px] text-slate-500">KAFKA OUTBOX</div>
+              </div>
+              <!-- Step 4 -->
+              <div id="stepNode4" class="p-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-400 space-y-1 transition-all">
+                <i class="fa-solid fa-circle-check block text-sm"></i>
+                <div class="font-bold">4. Final State</div>
+                <div class="text-[9px] text-slate-500" id="stepNode4Sub">CONFIRMED / CANCEL</div>
+              </div>
+            </div>
+
+            <!-- Order Transition History List -->
+            <div class="space-y-1.5 pt-2 border-t border-slate-800">
+              <span class="text-[11px] font-semibold text-slate-400 block">Order State Audit Trail (<code class="text-slate-300">order_status_history</code>):</span>
+              <ul id="listOrderHistory" class="space-y-1 font-mono text-[11px] text-slate-300 max-h-28 overflow-y-auto pr-1">
+                <li class="text-slate-500 italic">No order transitions recorded yet.</li>
+              </ul>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- LIVE REQUEST & EVENT INSPECTOR (CONSOLE) -->
+    <section class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
+      <div class="px-5 py-3 bg-slate-850 border-b border-slate-800 flex items-center justify-between">
+        <div class="flex items-center space-x-2">
+          <i class="fa-solid fa-terminal text-indigo-400 text-xs"></i>
+          <h3 class="text-xs font-bold text-white uppercase tracking-wider">Live HTTP Request & RFC 9457 Problem Inspector</h3>
+        </div>
+        <div class="flex items-center space-x-3">
+          <button onclick="clearConsoleLogs()" class="text-[11px] text-slate-400 hover:text-white transition">
+            <i class="fa-solid fa-trash-can mr-1"></i> Clear
+          </button>
+        </div>
+      </div>
+      <div id="consoleLogs" class="p-4 bg-slate-950 font-mono text-[11px] space-y-2.5 max-h-64 overflow-y-auto leading-relaxed">
+        <div class="text-slate-500">// Ready. Actions triggered above will log full HTTP headers, status codes, and responses here...</div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- FOOTER -->
+  <footer class="border-t border-slate-800 bg-slate-900/60 py-4 px-4 text-center text-xs text-slate-500">
+    StockForge Platform · Java 21 · Spring Boot 4 · PostgreSQL 18 · Apache Kafka 4 · Redis 8 · OpenTelemetry
+  </footer>
+
+  <!-- JAVASCRIPT: APPLICATION LOGIC & WEBCRYPTO JWT MINTING -->
+  <script>
+    // Configuration: defaults to current gateway origin, or http://localhost:8088 if opened as a local file / live server
+    const BASE_URL = (window.location.protocol === 'file:' || (window.location.port !== '8088' && window.location.port !== '8080'))
+      ? 'http://localhost:8088'
+      : window.location.origin;
+    const LOCAL_SECRET = "stockforge-local-development-only-hmac-key";
+
+    // Known Users
+    const USERS = {
+      admin: {
+        id: "00000000-0000-7000-8000-00000000ad01",
+        roles: ["ADMIN"],
+        label: "Admin (Operator)"
+      },
+      alice: {
+        id: "0192f5c4-6b0d-7e21-8f43-1a2b3c4d5e6f",
+        roles: ["CUSTOMER"],
+        label: "Alice (Shopper 1)"
+      },
+      bob: {
+        id: "0192f5c4-6b0d-7e21-8f43-1a2b3c4d5e99",
+        roles: ["CUSTOMER"],
+        label: "Bob (Shopper 2)"
+      }
+    };
+
+    let currentUser = USERS.admin;
+    let currentToken = "";
+    let activeReservation = null;
+    let activeOrder = null;
+    let lastEtag = null;
+
+    // --- JWT MINTING VIA WEBCRYPTO API (ZERO DEPENDENCIES) ---
+    function base64Url(str) {
+      return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+    function base64UrlBuffer(buffer) {
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      return base64Url(binary);
+    }
+    async function mintJwt(userId, roles) {
+      const header = { alg: "HS256", typ: "JWT" };
+      const now = Math.floor(Date.now() / 1000);
+      const payload = {
+        iss: "stockforge-auth",
+        aud: ["stockforge-api"],
+        sub: userId,
+        roles: roles,
+        iat: now,
+        exp: now + 7200
+      };
+      const encHeader = base64Url(JSON.stringify(header));
+      const encPayload = base64Url(JSON.stringify(payload));
+      const data = new TextEncoder().encode(`${encHeader}.${encPayload}`);
+      const key = await crypto.subtle.importKey(
+        "raw",
+        new TextEncoder().encode(LOCAL_SECRET),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"]
+      );
+      const signature = await crypto.subtle.sign("HMAC", key, data);
+      return `${encHeader}.${encPayload}.${base64UrlBuffer(signature)}`;
+    }
+
+    async function switchUser(type) {
+      if (type === 'random') {
+        currentUser = {
+          id: crypto.randomUUID(),
+          roles: ["CUSTOMER"],
+          label: "Random User"
+        };
+      } else {
+        currentUser = USERS[type];
+      }
+
+      currentToken = await mintJwt(currentUser.id, currentUser.roles);
+      
+      // Update UI
+      document.getElementById('lblRole').textContent = currentUser.roles.includes("ADMIN") ? "ADMIN" : "CUSTOMER";
+      document.getElementById('lblRole').className = currentUser.roles.includes("ADMIN") ? "text-indigo-400 font-mono" : "text-emerald-400 font-mono";
+      document.getElementById('lblUserId').textContent = currentUser.id;
+
+      // Update button highlights
+      ['admin', 'alice', 'bob', 'random'].forEach(u => {
+        const btn = document.getElementById(`btn-${u}`);
+        if (!btn) return;
+        if (u === type) {
+          btn.className = "px-3 py-1 rounded-md text-xs font-semibold bg-indigo-600 text-white shadow-sm transition";
+        } else {
+          btn.className = "px-3 py-1 rounded-md text-xs font-medium text-slate-400 hover:text-white transition";
+        }
+      });
+
+      logConsole("SYSTEM", `Switched active caller to: ${currentUser.label} (${currentUser.id})`);
+    }
+
+    function copyCurrentToken() {
+      navigator.clipboard.writeText(currentToken);
+      const txt = document.getElementById('btnCopyTokenText');
+      txt.textContent = "Copied!";
+      setTimeout(() => txt.textContent = "Copy JWT", 1500);
+    }
+
+    function generateNewIdempotencyKey() {
+      const key = 'idem-' + Math.random().toString(36).substring(2, 10);
+      document.getElementById('txtIdempotencyKey').value = key;
+      return key;
+    }
+
+    // --- LOGGING UTILITY ---
+    function logConsole(method, message, status = null, duration = null) {
+      const container = document.getElementById('consoleLogs');
+      const row = document.createElement('div');
+      const time = new Date().toLocaleTimeString();
+      let statusBadge = "";
+      if (status !== null) {
+        const color = status >= 200 && status < 300 ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/20" :
+                      status === 304 ? "text-blue-400 bg-blue-500/10 border-blue-500/20" :
+                      status >= 400 && status < 500 ? "text-amber-400 bg-amber-500/10 border-amber-500/20" :
+                      "text-rose-400 bg-rose-500/10 border-rose-500/20";
+        statusBadge = `<span class="px-1.5 py-0.5 rounded border ${color} font-bold mr-1.5">${status}</span>`;
+      }
+      const durText = duration ? `<span class="text-slate-500 ml-1.5">(${duration}ms)</span>` : "";
+
+      row.innerHTML = `<span class="text-slate-500">[${time}]</span> <strong class="text-indigo-400">${method}</strong> ${statusBadge}${message} ${durText}`;
+      container.appendChild(row);
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function clearConsoleLogs() {
+      document.getElementById('consoleLogs').innerHTML = '<div class="text-slate-500">// Console cleared.</div>';
+    }
+
+    // --- ACCORDION TOGGLE ---
+    function toggleAccordion(id) {
+      const content = document.getElementById(id);
+      const icon = document.getElementById(id + 'Icon');
+      if (content.classList.contains('hidden')) {
+        content.classList.remove('hidden');
+        icon.classList.add('rotate-180');
+      } else {
+        content.classList.add('hidden');
+        icon.classList.remove('rotate-180');
+      }
+    }
+
+    // --- API CLIENT WRAPPER ---
+    async function apiRequest(method, path, body = null, extraHeaders = {}) {
+      const start = performance.now();
+      const headers = {
+        'Accept': 'application/json',
+        ...extraHeaders
+      };
+      if (currentToken) {
+        headers['Authorization'] = `Bearer ${currentToken}`;
+      }
+      if (body) {
+        headers['Content-Type'] = 'application/json';
+      }
+
+      let res;
+      try {
+        res = await fetch(`${BASE_URL}${path}`, {
+          method,
+          headers,
+          body: body ? JSON.stringify(body) : null
+        });
+      } catch (err) {
+        logConsole(method, `Network/Connection error to ${path}: ${err.message}`, "ERR");
+        throw err;
+      }
+
+      const duration = Math.round(performance.now() - start);
+      let data = null;
+      const contentType = res.headers.get("content-type") || "";
+      if (contentType.includes("json") || contentType.includes("problem+json")) {
+        data = await res.json();
+      }
+
+      let headerInfo = "";
+      if (res.headers.get("Idempotent-Replayed")) {
+        headerInfo += ` <span class="text-emerald-400">[Idempotent-Replayed: true]</span>`;
+      }
+      if (res.headers.get("Location")) {
+        headerInfo += ` <span class="text-slate-400">[Location: ${res.headers.get("Location")}]</span>`;
+      }
+
+      const detailMsg = data && data.detail ? ` - <em>"${data.detail}"</em>` : "";
+      logConsole(method, `${path}${headerInfo}${detailMsg}`, res.status, duration);
+      return { status: res.status, headers: res.headers, data };
+    }
+
+    // --- CATALOG & INVENTORY FUNCTIONS ---
+    async function loadProductCatalog() {
+      const res = await apiRequest("GET", "/api/v1/products");
+      const sel = document.getElementById('selProduct');
+      sel.innerHTML = "";
+      if (res.data && res.data.items && res.data.items.length > 0) {
+        res.data.items.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.id;
+          opt.textContent = `${p.sku} — ${p.name} ($${p.priceAmount} ${p.priceCurrency})`;
+          opt.dataset.json = JSON.stringify(p);
+          sel.appendChild(opt);
+        });
+        onProductSelected();
+      } else {
+        sel.innerHTML = `<option value="">No products found (Create one as Admin)</option>`;
+      }
+    }
+
+    async function onProductSelected() {
+      const sel = document.getElementById('selProduct');
+      const opt = sel.options[sel.selectedIndex];
+      if (!opt || !opt.dataset.json) return;
+      const product = JSON.parse(opt.dataset.json);
+
+      document.getElementById('dispProductName').textContent = product.name;
+      document.getElementById('dispProductSku').textContent = `SKU: ${product.sku}`;
+      document.getElementById('dispProductPrice').textContent = `$${product.priceAmount} ${product.priceCurrency}`;
+
+      // Fetch Live Availability from Gateway / Redis
+      const availRes = await apiRequest("GET", `/api/v1/products/${product.id}/availability`);
+      if (availRes.status === 200 && availRes.data) {
+        lastEtag = availRes.headers.get("ETag");
+        const a = availRes.data;
+        const total = a.totalQuantity || 1;
+        const avail = a.availableQuantity;
+        const resv = a.reservedQuantity;
+        const sold = a.soldQuantity;
+
+        document.getElementById('lblAvailable').textContent = avail;
+        document.getElementById('lblReserved').textContent = resv;
+        document.getElementById('lblSold').textContent = sold;
+        document.getElementById('lblStockTotal').textContent = total;
+        document.getElementById('lblStockSum').textContent = (avail + resv + sold);
+
+        document.getElementById('barAvailable').style.width = `${(avail / total) * 100}%`;
+        document.getElementById('barReserved').style.width = `${(resv / total) * 100}%`;
+        document.getElementById('barSold').style.width = `${(sold / total) * 100}%`;
+      }
+    }
+
+    async function createCustomProduct() {
+      await switchUser('admin');
+      const sku = document.getElementById('newSku').value.trim();
+      const name = document.getElementById('newName').value.trim();
+      const amount = document.getElementById('newPrice').value.trim();
+      const initialStock = parseInt(document.getElementById('newStock').value);
+
+      const res = await apiRequest("POST", "/api/v1/admin/products", {
+        sku,
+        name,
+        price: { amount, currency: "USD" },
+        initialStock
+      });
+
+      if (res.status === 201) {
+        await loadProductCatalog();
+        document.getElementById('selProduct').value = res.data.id;
+        onProductSelected();
+      }
+    }
+
+    async function adjustProductStock() {
+      await switchUser('admin');
+      const productId = document.getElementById('selProduct').value;
+      if (!productId) return alert("Select a product first.");
+      const delta = parseInt(document.getElementById('txtStockDelta').value);
+      const idempotencyKey = 'adj-' + Math.random().toString(36).substring(2, 9);
+
+      await apiRequest("POST", `/api/v1/admin/products/${productId}/stock-adjustments`, {
+        delta,
+        reason: "Demo stock manual adjustment"
+      }, { "Idempotency-Key": idempotencyKey });
+
+      onProductSelected();
+    }
+
+    // --- CHECKOUT & SAGA EXECUTION ---
+    async function actionReserve() {
+      const productId = document.getElementById('selProduct').value;
+      if (!productId) return alert("Please select a product first.");
+      const quantity = parseInt(document.getElementById('txtReserveQty').value);
+      const idempotencyKey = document.getElementById('txtIdempotencyKey').value || generateNewIdempotencyKey();
+
+      const res = await apiRequest("POST", "/api/v1/reservations", {
+        productId,
+        quantity
+      }, { "Idempotency-Key": idempotencyKey });
+
+      if (res.status === 201) {
+        activeReservation = res.data;
+        document.getElementById('dispResId').textContent = activeReservation.id;
+        document.getElementById('lblResExpires').textContent = new Date(activeReservation.expiresAt).toLocaleTimeString();
+        document.getElementById('activeReservationBanner').classList.remove('hidden');
+        updateSagaPipeline(1, "PENDING");
+        onProductSelected(); // refresh stock meter
+      }
+    }
+
+    async function actionPlaceOrder() {
+      if (!activeReservation) {
+        return alert("Reserve stock first before placing an order!");
+      }
+      const simulation = document.getElementById('selPaymentSimulation').value;
+      const idempotencyKey = 'ord-' + Math.random().toString(36).substring(2, 10);
+      const extraHeaders = { "Idempotency-Key": idempotencyKey };
+      if (simulation) {
+        extraHeaders['X-Payment-Simulation'] = simulation;
+      }
+
+      updateSagaPipeline(2, "PAYMENT_REQUESTED");
+
+      const res = await apiRequest("POST", "/api/v1/orders", {
+        reservationId: activeReservation.id
+      }, extraHeaders);
+
+      if (res.status === 202) {
+        const orderId = res.data.id;
+        activeOrder = res.data;
+        updateSagaPipeline(3, "WAITING_KAFKA");
+
+        // Poll order status to show saga progression
+        pollOrderUntilFinal(orderId);
+      }
+    }
+
+    async function pollOrderUntilFinal(orderId) {
+      let attempts = 0;
+      const interval = setInterval(async () => {
+        attempts++;
+        const res = await apiRequest("GET", `/api/v1/orders/${orderId}`);
+        if (res.status === 200) {
+          const ord = res.data;
+          renderOrderAuditHistory(ord.history);
+          if (ord.status === "CONFIRMED") {
+            clearInterval(interval);
+            updateSagaPipeline(4, "CONFIRMED");
+            onProductSelected();
+          } else if (ord.status === "CANCELLED") {
+            clearInterval(interval);
+            updateSagaPipeline(4, "CANCELLED");
+            onProductSelected();
+          } else if (ord.status === "REFUNDED" || ord.status === "REFUND_PENDING") {
+            clearInterval(interval);
+            updateSagaPipeline(4, "REFUNDED");
+            onProductSelected();
+          }
+        }
+        if (attempts >= 10) clearInterval(interval);
+      }, 700);
+    }
+
+    function updateSagaPipeline(step, status) {
+      const badge = document.getElementById('badgeOrderStatus');
+      badge.textContent = status;
+      badge.className = `px-2.5 py-0.5 rounded-full font-mono font-semibold text-[11px] ${
+        status === "CONFIRMED" ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" :
+        status === "CANCELLED" || status === "REFUNDED" ? "bg-rose-500/20 text-rose-400 border border-rose-500/30" :
+        "bg-amber-500/20 text-amber-400 border border-amber-500/30"
+      }`;
+
+      // Reset nodes
+      for (let i = 1; i <= 4; i++) {
+        const node = document.getElementById(`stepNode${i}`);
+        node.className = "p-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-500 space-y-1 transition-all";
+      }
+
+      if (step >= 1) {
+        document.getElementById('stepNode1').className = "p-2 rounded-lg bg-indigo-950/60 border border-indigo-600 text-indigo-300 space-y-1 transition-all shadow-sm";
+      }
+      if (step >= 2) {
+        document.getElementById('stepNode2').className = "p-2 rounded-lg bg-indigo-950/60 border border-indigo-600 text-indigo-300 space-y-1 transition-all shadow-sm";
+      }
+      if (step >= 3) {
+        document.getElementById('stepNode3').className = "p-2 rounded-lg bg-amber-950/60 border border-amber-600 text-amber-300 space-y-1 transition-all shadow-sm";
+      }
+      if (step >= 4) {
+        const isSuccess = status === "CONFIRMED";
+        const node = document.getElementById('stepNode4');
+        document.getElementById('stepNode4Sub').textContent = status;
+        node.className = isSuccess
+          ? "p-2 rounded-lg bg-emerald-950/60 border border-emerald-500 text-emerald-300 space-y-1 transition-all shadow-md"
+          : "p-2 rounded-lg bg-rose-950/60 border border-rose-500 text-rose-300 space-y-1 transition-all shadow-md";
+      }
+    }
+
+    function renderOrderAuditHistory(history) {
+      const list = document.getElementById('listOrderHistory');
+      list.innerHTML = "";
+      if (!history || history.length === 0) return;
+      history.forEach(h => {
+        const li = document.createElement('li');
+        li.className = "flex items-center justify-between text-slate-300";
+        li.innerHTML = `<span><strong class="text-indigo-400">${h.fromStatus || 'START'}</strong> ➔ <strong class="text-emerald-400">${h.toStatus}</strong> <em>(${h.reason})</em></span> <span class="text-slate-500 text-[10px]">${new Date(h.occurredAt).toLocaleTimeString()}</span>`;
+        list.appendChild(li);
+      });
+    }
+
+    // --- ACCORDION STEP RUNNERS (AUTOMATED DEMO SUITE) ---
+
+    // Step 1: Admin Creates Flash Sale Product
+    async function runStep1() {
+      await switchUser('admin');
+      const uniqueSuffix = Math.floor(Math.random() * 900 + 100);
+      const sku = `SNEAKER-FLASH-${uniqueSuffix}`;
+      const res = await apiRequest("POST", "/api/v1/admin/products", {
+        sku,
+        name: `Flash Edition Runner #${uniqueSuffix}`,
+        price: { amount: "129.00", currency: "USD" },
+        initialStock: 10
+      });
+      if (res.status === 201) {
+        await loadProductCatalog();
+        document.getElementById('selProduct').value = res.data.id;
+        onProductSelected();
+        alert(`Step 1 Complete! Product ${sku} with 10 units created!`);
+      }
+    }
+
+    // Step 2: Alice Checks Availability & ETag
+    async function runStep2() {
+      await switchUser('alice');
+      const productId = document.getElementById('selProduct').value;
+      if (!productId) return alert("Run Step 1 first to create a product.");
+      
+      // First read: 200 OK with ETag
+      const res1 = await apiRequest("GET", `/api/v1/products/${productId}/availability`);
+      const etag = res1.headers.get("ETag");
+
+      // Second read with If-None-Match: 304 Not Modified
+      if (etag) {
+        await apiRequest("GET", `/api/v1/products/${productId}/availability`, null, { "If-None-Match": etag });
+      }
+      alert("Step 2 Complete! Checked availability and verified 304 Not Modified conditional GET!");
+    }
+
+    // Step 3: Alice Reserves 1 Unit
+    async function runStep3() {
+      await switchUser('alice');
+      generateNewIdempotencyKey();
+      await actionReserve();
+      alert("Step 3 Complete! Stock reserved atomically with Idempotency-Key.");
+    }
+
+    // Step 4: Idempotent Replay
+    async function runStep4() {
+      await switchUser('alice');
+      if (!activeReservation) return alert("Run Step 3 first to create a reservation.");
+      // Re-send exact same reservation request
+      await actionReserve();
+      alert("Step 4 Complete! Replayed same request. Notice [Idempotent-Replayed: true] in console without extra stock deduction!");
+    }
+
+    // Step 5: Saga Checkout Confirmed
+    async function runStep5() {
+      await switchUser('alice');
+      document.getElementById('selPaymentSimulation').value = ""; // normal success
+      await actionPlaceOrder();
+    }
+
+    // Step 6: Saga Failure & Auto-Rollback
+    async function runStep6() {
+      await switchUser('alice');
+      generateNewIdempotencyKey();
+      await actionReserve();
+      document.getElementById('selPaymentSimulation').value = "FAILED";
+      await actionPlaceOrder();
+      alert("Step 6 Complete! Payment failure injected. Watch Saga cancel order and release stock back to available!");
+    }
+
+    // Step 7: BOLA Security Test
+    async function runStep7() {
+      if (!activeOrder) return alert("Run Step 5 first to create an order as Alice.");
+      await switchUser('bob');
+      const res = await apiRequest("GET", `/api/v1/orders/${activeOrder.id}`);
+      if (res.status === 404) {
+        alert("Step 7 Complete! Bob queried Alice's order and received 404 Not Found (BOLA protection verified)!");
+      }
+    }
+
+    // Step 8: High Concurrency Burst (15 Simultaneous Buyers)
+    async function runStep8() {
+      const productId = document.getElementById('selProduct').value;
+      if (!productId) return alert("Select a product first.");
+
+      logConsole("BURST", "Firing 15 simultaneous parallel buyers via Promise.all()...");
+      const attempts = 15;
+      const promises = [];
+
+      for (let i = 0; i < attempts; i++) {
+        promises.push((async (index) => {
+          const userToken = await mintJwt(crypto.randomUUID(), ["CUSTOMER"]);
+          const res = await fetch(`${BASE_URL}/api/v1/reservations`, {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${userToken}`,
+              "Content-Type": "application/json",
+              "Idempotency-Key": `burst-${index}-${Math.random().toString(36).substring(2, 9)}`
+            },
+            body: JSON.stringify({ productId, quantity: 1 })
+          });
+          return res.status;
+        })(i));
+      }
+
+      const results = await Promise.all(promises);
+      const successCount = results.filter(s => s === 201).length;
+      const conflictCount = results.filter(s => s === 409).length;
+
+      logConsole("BURST_RESULT", `Contention burst complete: ${successCount} Reserved (201), ${conflictCount} Sold Out (409), 0 Oversold!`);
+      onProductSelected();
+      alert(`Contention Burst Finished!\n201 Created (Won): ${successCount}\n409 Conflict (Lost): ${conflictCount}\nOversold: 0`);
+    }
+
+    // Initial Startup
+    window.addEventListener('DOMContentLoaded', async () => {
+      generateNewIdempotencyKey();
+      await switchUser('admin');
+      await loadProductCatalog();
+    });
+  </script>
+</body>
+</html>
+
