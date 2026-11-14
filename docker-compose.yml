@@ -100,7 +100,7 @@ services:
       KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       # Topics are created explicitly with chosen partition counts, never by accident (spec §18). Each service
-      # declares the topics it owns at startup (stockforge.messaging.topics.declare).
+      # declares the topics it owns at startup (stoc9kforge.messaging.topics.declare).
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
     healthcheck:

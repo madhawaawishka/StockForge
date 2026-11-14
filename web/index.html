@@ -699,18 +699,34 @@
     }
 
     // --- CATALOG & INVENTORY FUNCTIONS ---
-    async function loadProductCatalog() {
-      const res = await apiRequest("GET", "/api/v1/products");
+    async function loadProductCatalog(selectedIdToSet = null) {
+      let allItems = [];
+      let cursor = null;
+      do {
+        const query = cursor ? `?limit=100&cursor=${encodeURIComponent(cursor)}` : `?limit=100`;
+        const res = await apiRequest("GET", `/api/v1/products${query}`);
+        if (res.data && res.data.items && res.data.items.length > 0) {
+          allItems = allItems.concat(res.data.items);
+          cursor = res.data.nextCursor || null;
+        } else {
+          cursor = null;
+        }
+      } while (cursor);
+
       const sel = document.getElementById('selProduct');
+      const previousValue = selectedIdToSet || sel.value;
       sel.innerHTML = "";
-      if (res.data && res.data.items && res.data.items.length > 0) {
-        res.data.items.forEach(p => {
+      if (allItems.length > 0) {
+        allItems.forEach(p => {
           const opt = document.createElement('option');
           opt.value = p.id;
           opt.textContent = `${p.sku} — ${p.name} ($${p.priceAmount} ${p.priceCurrency})`;
           opt.dataset.json = JSON.stringify(p);
           sel.appendChild(opt);
         });
+        if (previousValue && allItems.some(p => p.id === previousValue)) {
+          sel.value = previousValue;
+        }
         onProductSelected();
       } else {
         sel.innerHTML = `<option value="">No products found (Create one as Admin)</option>`;
