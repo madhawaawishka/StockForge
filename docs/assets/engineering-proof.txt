@@ -1,0 +1,82 @@
+
+====================================================================================================
+ACT 1  OVERSELL RACE
+----------------------------------------------------------------------------------------------------
+claim: 200 buyers, 50 units, released at the same instant: never more than 50 sold
+====================================================================================================
+  product PROOF-RACE-F4FF9D11 (01a1f4ab-1d3b-7480-bd77-fa780f8b0d3e) created with 50 units
+  200 requests finished in 1339 ms wall clock
+    HTTP 201:   50  reserved
+    HTTP 409:  150  sold out (clean RFC 9457 problem)
+  database: total=50 available=0 reserved=50 sold=0
+  [PASS] exactly 50 reservations succeeded (got 50)
+  [PASS] held units 50 never exceed total 50
+  [PASS] available + reserved + sold == total
+  [PASS] reservation rows (50) agree with the counters (50)
+
+====================================================================================================
+ACT 2  IDEMPOTENCY RACE
+----------------------------------------------------------------------------------------------------
+claim: one Idempotency-Key sent by 8 connections at once creates exactly one reservation
+====================================================================================================
+  statuses {201: 8}   replayed flag on 7 responses   distinct reservation ids 1
+  database: 1 reservation row(s); availability now 8/10
+  [PASS] every answer is a 201 or a rate-limit 429, nothing else (got {201: 8})
+  [PASS] every 201 carries the same reservation id
+  [PASS] one reservation row exists (1)
+  [PASS] stock was deducted once: 10 - 2 = 8
+
+====================================================================================================
+ACT 3  SAGA COMPENSATION
+----------------------------------------------------------------------------------------------------
+claim: a failed payment cancels the order and the stock returns to AVAILABLE
+====================================================================================================
+  reserve 201 -> place order 202 (202 means accepted, payment is asynchronous); order 01a1f4ab-2620-712b-8071-7bc423251f4a
+  order history, as recorded in orders.order_status_history:
+    16:36:59.540                 - -> PENDING_PAYMENT  Order placed
+    16:36:59.771   PENDING_PAYMENT -> CANCELLED        Payment failed: Declined by the payment provider
+  availability after compensation: 5/5
+  [PASS] POST /orders answered 202 Accepted
+  [PASS] order is CANCELLED
+  [PASS] the reservation was released: all 5 units are available again
+
+====================================================================================================
+ACT 4  KAFKA OUTAGE
+----------------------------------------------------------------------------------------------------
+claim: orders are accepted with the broker down; the outbox buffers and delivers after recovery
+====================================================================================================
+  baseline PENDING outbox rows (orders schema): 0
+  $ docker compose stop kafka
+  with Kafka DOWN: 5/5 orders answered 202 Accepted
+  PENDING outbox rows now: 10  (events committed with the order, waiting for the broker)
+  order states while the broker is down: {'PENDING_PAYMENT': 5}
+  $ docker compose start kafka
+  outbox drained after recovery: True
+  final order states: {'CONFIRMED': 5}
+  [PASS] every order was accepted while Kafka was down (no 5xx, no lost request)
+  [PASS] the events were buffered in the outbox (10 PENDING)
+  [PASS] the outbox relay delivered everything after the broker came back
+  [PASS] all 5 sagas completed: {'CONFIRMED': 5}
+
+====================================================================================================
+ACT 5  INVARIANT AUDIT
+----------------------------------------------------------------------------------------------------
+claim: after all of the above, every cross-service invariant still holds
+====================================================================================================
+  1. Stock conservation: available + reserved + sold = total, nothing negative
+  2. Reserved and sold counters match the reservation rows (no oversell, no leaked reservation)
+  3. Purchase limits: the counter equals the user's pending + confirmed units and never exceeds the limit
+  4. Expired reservations: nothing PENDING more than a minute past its expiry (the expiry worker keeps up)
+  5. Orders and reservations agree (quiescent only): a confirmed order owns a confirmed reservation
+  6. Orders and payments agree (quiescent only): money is never kept for an order that was not fulfilled
+  7. Outbox: no event waits more than a minute (quiescent only)
+  
+  Violations (empty means all invariants hold):
+   check_name | detail 
+  ------------+--------
+  
+  psql:<stdin>:94: NOTICE:  All invariants hold.
+  [PASS] scripts/check-invariants.sql exited 0 (no violations)
+
+====================================================================================================
+SUMMARY  act 1: PASS   act 2: PASS   act 3: PASS   act 4: PASS   act 5: PASS

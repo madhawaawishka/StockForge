@@ -3,6 +3,8 @@ package com.stockforge.gateway.adapter.in.web;
 import com.stockforge.gateway.application.StorefrontUseCases;
 import com.stockforge.gateway.domain.model.Views;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -39,7 +41,12 @@ class CatalogController {
 
     /** ETag from the product's last change: a client that has the current version gets 304 without a body. */
     @GetMapping("/{productId}")
-    @Operation(summary = "Get a product")
+    @Operation(summary = "Get a product", description = "ETag + Cache-Control; If-None-Match returns 304")
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "The product", useReturnTypeSchema = true),
+        @ApiResponse(responseCode = "304", description = "Not modified: the client already has this version"),
+        @ApiResponse(responseCode = "404", description = "product-not-found")
+    })
     ResponseEntity<Views.Product> get(@PathVariable String productId, WebRequest request) {
         Views.Product product = storefront.product(productId);
         String etag = "\"" + product.id() + "-" + product.updatedAt() + "\"";
@@ -59,7 +66,16 @@ class CatalogController {
     @GetMapping("/{productId}/availability")
     @Operation(
             summary = "Approximate availability",
-            description = "May be a few seconds old; reservations re-check stock")
+            description = "May be a few seconds old; reservations re-check stock. Weak ETag: send it back as"
+                    + " If-None-Match to get 304 Not Modified without a body while the stock is unchanged.")
+    @ApiResponses({
+        @ApiResponse(
+                responseCode = "200",
+                description = "Counters; approximate=true when served from the cache",
+                useReturnTypeSchema = true),
+        @ApiResponse(responseCode = "304", description = "Not modified: no body, no database read"),
+        @ApiResponse(responseCode = "404", description = "product-not-found")
+    })
     ResponseEntity<Views.Availability> availability(@PathVariable String productId, WebRequest request) {
         Views.Availability availability = storefront.availability(productId);
         String etag = "W/\""

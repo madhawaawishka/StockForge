@@ -3,7 +3,10 @@ package com.stockforge.gateway.adapter.in.web;
 import com.stockforge.gateway.application.StorefrontUseCases;
 import com.stockforge.gateway.domain.model.Views;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -60,7 +63,21 @@ class ShopperController {
     @PostMapping("/reservations")
     @Operation(
             summary = "Reserve stock",
-            description = "Idempotent per Idempotency-Key; a retry returns the original result")
+            description =
+                    "Atomic conditional UPDATE in PostgreSQL: concurrent buyers can never oversell. Idempotent per"
+                            + " Idempotency-Key; a retry returns the original result with Idempotent-Replayed: true.")
+    @ApiResponses({
+        @ApiResponse(responseCode = "201", description = "Reserved; the reservation expires if not ordered in time"),
+        @ApiResponse(responseCode = "400", description = "validation-failed, missing-idempotency-key"),
+        @ApiResponse(responseCode = "401", description = "unauthorized"),
+        @ApiResponse(responseCode = "404", description = "product-not-found"),
+        @ApiResponse(responseCode = "409", description = "insufficient-stock: sold out"),
+        @ApiResponse(
+                responseCode = "422",
+                description = "purchase-limit-exceeded, or idempotency-key-reused for a different request"),
+        @ApiResponse(responseCode = "429", description = "rate-limit-exceeded; see Retry-After"),
+        @ApiResponse(responseCode = "503", description = "service-unavailable: circuit open or bulkhead full")
+    })
     ResponseEntity<Views.Reservation> reserve(
             @RequestHeader("Idempotency-Key") @Pattern(regexp = IDEMPOTENCY_KEY, message = IDEMPOTENCY_KEY_MESSAGE)
                     String idempotencyKey,
@@ -76,23 +93,54 @@ class ShopperController {
 
     @GetMapping("/reservations/{reservationId}")
     @Operation(summary = "Get a reservation", description = "404 also for other users' reservations")
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "The reservation", useReturnTypeSchema = true),
+        @ApiResponse(responseCode = "404", description = "reservation-not-found, also when it belongs to another user")
+    })
     Views.Reservation reservation(@PathVariable String reservationId, Authentication authentication) {
         return storefront.reservation(Callers.of(authentication), reservationId);
     }
 
     @PostMapping("/reservations/{reservationId}/cancel")
     @Operation(summary = "Cancel a pending reservation")
+    @ApiResponses({
+        @ApiResponse(
+                responseCode = "200",
+                description = "Cancelled; the units are available again",
+                useReturnTypeSchema = true),
+        @ApiResponse(responseCode = "404", description = "reservation-not-found"),
+        @ApiResponse(responseCode = "409", description = "invalid-reservation-state: not PENDING any more")
+    })
     Views.Reservation cancel(@PathVariable String reservationId, Authentication authentication) {
         return storefront.cancelReservation(Callers.of(authentication), reservationId);
     }
 
     /** 202 Accepted: the order exists, payment completes asynchronously; poll the Location (spec §12). */
     @PostMapping("/orders")
-    @Operation(summary = "Place an order for a reservation", description = "Payment runs asynchronously")
+    @Operation(
+            summary = "Place an order for a reservation",
+            description = "Starts the checkout saga: payment runs asynchronously over Kafka. Poll the Location header."
+                    + " A failed payment compensates: the order is CANCELLED and the stock is released.")
+    @ApiResponses({
+        @ApiResponse(responseCode = "202", description = "Accepted: the order is PENDING_PAYMENT; see Location"),
+        @ApiResponse(
+                responseCode = "400",
+                description = "validation-failed, missing-idempotency-key, payment-simulation-disabled"),
+        @ApiResponse(responseCode = "404", description = "reservation-not-found, also when it belongs to another user"),
+        @ApiResponse(responseCode = "409", description = "reservation-not-orderable, reservation-already-ordered"),
+        @ApiResponse(responseCode = "422", description = "idempotency-key-reused"),
+        @ApiResponse(responseCode = "429", description = "rate-limit-exceeded; see Retry-After")
+    })
     ResponseEntity<Views.Order> placeOrder(
             @RequestHeader("Idempotency-Key") @Pattern(regexp = IDEMPOTENCY_KEY, message = IDEMPOTENCY_KEY_MESSAGE)
                     String idempotencyKey,
-            @RequestHeader(name = "X-Payment-Simulation", required = false) String paymentSimulation,
+            @Parameter(
+                            description =
+                                    "Test hook, local stack only: forces the simulated payment outcome. Use FAILED"
+                                            + " to watch the saga compensate.",
+                            schema = @Schema(allowableValues = {"SUCCEEDED", "FAILED", "TIMED_OUT", "NO_RESPONSE"}))
+                    @RequestHeader(name = "X-Payment-Simulation", required = false)
+                    String paymentSimulation,
             @Valid @RequestBody PlaceOrderRequest body,
             Authentication authentication) {
         Views.Idempotent<Views.Order> result = storefront.placeOrder(
@@ -107,7 +155,16 @@ class ShopperController {
     }
 
     @GetMapping("/orders/{orderId}")
-    @Operation(summary = "Order status and history", description = "404 also for other users' orders")
+    @Operation(
+            summary = "Order status and history",
+            description = "Includes the audit trail of every state change. 404 also for other users' orders (BOLA).")
+    @ApiResponses({
+        @ApiResponse(
+                responseCode = "200",
+                description = "The order with its status history",
+                useReturnTypeSchema = true),
+        @ApiResponse(responseCode = "404", description = "order-not-found, also when it belongs to another user")
+    })
     Views.Order order(@PathVariable String orderId, Authentication authentication) {
         return storefront.order(Callers.of(authentication), orderId);
     }

@@ -33,7 +33,12 @@ class GatewayConfiguration {
                 .info(new Info()
                         .title("StockForge API")
                         .version("v1")
-                        .description("Flash-sale reservations and checkout. Errors are RFC 9457 Problem Details."))
+                        .description("Flash-sale reservations and checkout. Errors are RFC 9457 Problem Details"
+                                + " (problem types: docs/api/problems.md).\n\n"
+                                + "**Try it locally:** run `python scripts/dev-token.py` (add `--admin` for the"
+                                + " administration endpoints), press **Authorize** and paste the token. Every"
+                                + " state-changing call needs a fresh `Idempotency-Key`; send the same one twice to see"
+                                + " the replay (`Idempotent-Replayed: true`)."))
                 .components(new Components()
                         .addSecuritySchemes(
                                 "bearer",

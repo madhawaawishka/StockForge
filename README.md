@@ -14,11 +14,36 @@ StockForge is a production-grade, distributed flash-sale and inventory platform 
 
 ---
 
-## 🎬 Live Platform Demo Walkthrough
+## 🎬 Proof, Not Claims — a Live Run of the Real Stack
 
-![StockForge Live Demo Walkthrough](docs/assets/stockforge-demo.gif)
+![StockForge showcase: Swagger UI, concurrency and chaos proof, Grafana, Kafka UI](docs/assets/stockforge-showcase.gif)
 
-*The automated walkthrough cycles through the interactive live dashboard (`http://localhost:8088/`), Grafana system overview, business invariant tracking, Kafka event stream topics, and OpenAPI interactive documentation.*
+Every frame is captured from the running system, nothing is mocked or canned:
+
+1. **Swagger UI, driven for real** (authorize with a JWT, fill the form, *Execute*): create a product, read availability with a weak ETag, reserve stock, **replay the same `Idempotency-Key`** and see `Idempotent-Replayed: true`, place an order with a forced payment failure, watch the saga go `PENDING_PAYMENT → CANCELLED`, then read the same order as another user and get a `404` (BOLA defence).
+2. **A terminal proof against PostgreSQL** ([`scripts/demo/engineering_proof.py`](scripts/demo/engineering_proof.py), full output in [`docs/assets/engineering-proof.txt`](docs/assets/engineering-proof.txt)):
+
+   | Act | What is thrown at the system | What is verified |
+   | :--- | :--- | :--- |
+   | 1. Oversell race | 200 buyers released by a barrier in the same instant, 50 units | exactly 50 × `201`, 150 × `409`; `available + reserved + sold = total`; reservation rows match the counters |
+   | 2. Idempotency race | one `Idempotency-Key` from 8 connections at once | every `201` carries the same reservation id; one row in the database; stock deducted once |
+   | 3. Saga compensation | payment forced to fail | order `CANCELLED`, full audit trail in `order_status_history`, all units available again |
+   | 4. Kafka outage | `docker compose stop kafka`, then 5 checkouts | all 5 answered `202`; 10 events wait in the outbox; after the broker returns the relay drains them and all 5 sagas reach `CONFIRMED` |
+   | 5. Invariant audit | [`scripts/check-invariants.sql`](scripts/check-invariants.sql) across all four service schemas | *All invariants hold* |
+
+3. **Grafana and Kafka UI captured right after that load** — invariant violations `0`, nothing dead-lettered, the saga topics and their outbox-published events. The one red tile ("events published within 1 s") is the Act 4 Kafka outage delaying delivery, which is exactly what it is meant to show.
+
+Reproduce it yourself (the proof stops the Kafka container for about a minute):
+
+```bash
+docker compose --profile apps --profile tools up -d --wait
+python scripts/demo/engineering_proof.py                 # all five acts, exits non-zero if any guarantee fails
+pip install playwright pillow                            # optional: re-record the GIFs (uses your installed Edge/Chrome)
+python scripts/demo/showcase_gif.py                      # whole GIF
+python scripts/demo/swagger_walkthrough.py               # only the Swagger UI part
+```
+
+The standalone [Swagger UI session](docs/assets/swagger-walkthrough.gif) is also available on its own. The proof measures guarantees, not speed: latency under open-model load is measured with k6 below.
 
 ---
 
@@ -29,7 +54,7 @@ When the platform is running, access all developer tools and management consoles
 | Portal / Tool | URL | Default Credentials / Purpose |
 | :--- | :--- | :--- |
 | **Interactive Demo Dashboard** | [http://localhost:8088/](http://localhost:8088/) | Complete interactive showcase: User switcher (Admin, Alice, Bob), live stock meter, saga pipeline, and 8-step demo accordion |
-| **Swagger UI / OpenAPI** | [http://localhost:8088/swagger-ui.html](http://localhost:8088/swagger-ui.html) | Interactive REST API tester & documentation (port 8088 configured in `.env`) |
+| **Swagger UI / OpenAPI** | [http://localhost:8088/swagger-ui.html](http://localhost:8088/swagger-ui.html) | Interactive REST API tester. Every endpoint documents its real responses (201/202/304/404/409/422/429 + problem types). Authorize with `python scripts/dev-token.py` (`--admin` for admin endpoints) |
 | **Grafana** | [http://localhost:3000](http://localhost:3000) | Anonymous Admin. Real-time RED metrics, JVM stats, latency percentiles & invariants |
 | **Kafka UI** | [http://localhost:8090](http://localhost:8090) | Inspect Kafka topics (`order-events`, `inventory-events`), message payloads & consumer lag |
 | **Prometheus** | [http://localhost:9090](http://localhost:9090) | Metric scrape targets, SLO burn-rate recording rules & alerts (`/alerts`) |
@@ -241,7 +266,7 @@ StockForge/
 ├── observability/              # Prometheus alert rules, recording rules, and Grafana dashboard definitions
 ├── database/                   # Initial SQL schema migrations, roles, and seed scripts
 ├── docs/                       # Architectural diagrams (C4), ADRs, benchmarks, postmortems, and security reviews
-└── scripts/                    # Helper scripts (dev-token.py, invariant validators, traffic generators)
+└── scripts/                    # dev-token.py, invariant validators, traffic generator, demo/ (engineering proof + GIF recorders)
 ```
 
 ---

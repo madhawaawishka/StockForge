@@ -27,22 +27,23 @@ This file is the single source of truth for **where the build is**. Every workin
 | Item | Value |
 | :--- | :--- |
 | Phase | **All six weeks complete** (Tier 1 and Tier 2; Tier 3 Terraform validated, not applied). Remaining items are owner actions and stretch goals, see Next steps |
-| Active branch | `fix/audit-remediation-and-week6` (uncommitted; owner commits — 19-commit plan in the Session 7 log, plus the one addition in the Session 8 log) |
-| Build status | `./mvnw clean verify` **BUILD SUCCESS** on 2026-10-16 (4 min 06 s): 264 unit/architecture + 86 integration tests, 0 failures; Error Prone and Spotless clean |
+| Active branch | `main` (PR #13 merged 2026-10-16; later demo/docs commits went straight to `main`, last `f586b6a`) |
+| Build status | 2026-11-19: `./mvnw verify` (JDK 23, Docker running) **BUILD SUCCESS**, 4 min 48 s: 264 unit/architecture + 86 integration tests, 0 failures, Spotless and Error Prone clean |
 | System test | Full stack in Docker healthy; `scripts/verify-readme.sh` **44/44** README checks pass (incl. one trace across all five services); k6 smoke, flash sale, checkout, spike and soak run; Trivy: 0 CRITICAL / 0 HIGH in all five images |
-| CI on GitHub | **Never passed before this branch** (`mvnw` lacked the executable bit — POSTMORTEM-001). Fixed and CI extended; first real run happens on the owner's push |
-| Last updated | 2026-10-16 |
+| CI on GitHub | **Workflow has never concluded green** (45 runs). Latest real runs (2026-11-04, `52549f7`, `5fa70d1`): 6/7 jobs pass incl. *Build and test* (all ITs) and the full-stack system job; *Trivy* fails at "Set up job" — `aquasecurity/trivy-action@0.33.1` cannot be resolved. Latest push (`f586b6a`, 2026-11-14): no job started — **account locked due to a billing issue** |
+| Last updated | 2026-11-19 |
 
 ## Next steps
-1. Owner: review, commit (19 Conventional Commits, see the Session 7 log) and push `fix/audit-remediation-and-week6`;
-   open a PR. Add the label `buf skip breaking` to that PR — the proto package rename is an intentional breaking change.
-2. Owner: after the push, confirm every CI job ran its steps (`build`, `contracts`, `observability`, `terraform`,
-   `security-scan`, `system`). Enable branch protection on `main` requiring *Build and test*.
-3. Owner: after committing, `git ls-files -s mvnw scripts/verify-invariants.sh scripts/dev-token.py
-   scripts/verify-readme.sh` must show `100755` for all four (Session 7 plan + the Session 8 addition).
-4. Owner: record the demo GIF (W6-04) — e.g. `docker compose --profile apps up -d --build --wait`, then the k6 smoke
-   test and the Grafana *Business flow & invariants* dashboard during `reservation-contention.js`. Save as
-   `docs/assets/demo.gif` and link it at the top of README.md.
+1. Owner: resolve the GitHub billing lock (no CI job has started since 2026-11-14).
+2. Fix the Trivy job: pin `aquasecurity/trivy-action` (two `uses:` lines in `.github/workflows/ci.yml`) to an existing
+   release, ideally by commit SHA; then confirm the whole *CI* workflow concludes green and enable branch protection
+   on `main` requiring *Build and test*. Return to feature branches + PRs (recent commits went straight to `main`).
+3. Replace the wildcard CORS policy added with the demo dashboard (`WebSecurityConfiguration`,
+   `setAllowedOriginPatterns("*")`, 2026-11-04) with configured origins (`GatewayProperties`), and record it in
+   docs/security.md.
+4. Owner: review and commit the Session 10 changes (README, showcase GIF, `scripts/demo/`, OpenAPI response docs).
+   Optional: delete the superseded `docs/assets/stockforge-demo.gif` and `scripts/build_demo_gif.py` (nothing links to
+   them any more). Add a CI step that runs `scripts/demo/engineering_proof.py --acts 1 2 3 5` in the *system* job.
 5. Owner: decide the LICENSE (open question below).
 6. Stretch: a 30-min `soak.js`; meet NFR-5 (sold-out P99 < 50 ms) with a gateway-side sold-out flag; mTLS between
    services; JWKS-based JWT validation; drop the Tomcat/Jackson/lz4 version overrides in `pom.xml` once a Spring Boot
@@ -109,7 +110,7 @@ are marked *(audit)*; see the Session 6 log for what was wrong before.
 - [x] W6-01 Security pass: OWASP API Top 10 review, authorization tests, Trivy/dependency scanning (§28) — `docs/security.md`, `OrderQueriesTest`, Trivy in CI
 - [x] W6-02 Dockerfiles (multi-stage, non-root), full compose stack, graceful-shutdown test (§33) — `Dockerfile`, `docker-compose.yml` profiles, `InventoryChaosIT.aStoppingInstanceDrainsInFlightRequestsAndLosesNoEvents`
 - [x] W6-03 Terraform + optional AWS deployment (Tier 3) (§34) — `infra/terraform`, `fmt` + `validate` pass; **not applied**
-- [ ] W6-04 Final README with results, C4 + sequence diagrams, demo GIF (§36, §39) — README and diagrams done; **demo GIF is an owner task** (cannot be recorded here)
+- [x] W6-04 Final README with results, C4 + sequence diagrams, demo GIF (§36, §39) — README, diagrams and the live-run showcase GIF done (Session 10)
 - [x] W6-05 Resume bullets + interview prep notes (§40, §41) — `docs/career/`
 
 ---
@@ -175,6 +176,61 @@ Short pointers; full reasoning lives in `docs/decisions/`.
 
 ## Session log
 _Newest first._
+
+### Session 10 — 2026-11-19 — A demo that shows engineering depth (README GIF, Swagger, proof script)
+**Goal (owner):** the README walkthrough GIF only showed screenshots and the demo UI; replace it with something that
+shows real depth: Swagger UI driven for real, plus the Grafana and Kafka UI dashboards, in one complete GIF.
+
+**Built**
+- `scripts/demo/engineering_proof.py` (stdlib only): five acts against the running stack, each asserting on data read
+  back from HTTP and PostgreSQL: oversell race (200 buyers / 50 units), same-key idempotency race, saga compensation,
+  Kafka outage with outbox buffering and recovery, and `check-invariants.sql`. Exits non-zero if a guarantee fails.
+- `scripts/demo/swagger_walkthrough.py` and `scripts/demo/showcase_gif.py` (Playwright using the installed Edge, Pillow):
+  drive the real Swagger UI, run the proof, screenshot Grafana and Kafka UI after the load, and assemble
+  `docs/assets/stockforge-showcase.gif` (17 frames, 1280x820, 1.1 MiB). The GIF is written only if every act passed.
+  Transcript saved as `docs/assets/engineering-proof.txt`; also `docs/assets/swagger-walkthrough.gif`.
+- OpenAPI: Swagger documented only `200` for every operation. `@ApiResponses` now list the real 201/202/304/404/409/
+  422/429 and problem types, `X-Payment-Simulation` is a dropdown, and the page says how to get a token. No behaviour change.
+- README: new "Proof, not claims" section replaces the old walkthrough; Swagger row and scripts line updated.
+
+**Findings**
+- The same-key idempotency race (open item from Session 9) holds: one reservation, one row, stock deducted once.
+- My first Act 2 asserted `201` for all 25 connections of one user; a rerun got 15x `429` from the per-user reservation
+  bucket (capacity 10). The guarantee held, the assertion was wrong; it now uses 8 connections and asserts on what was
+  created. The first run passing with 25x `201` was most likely the limiter failing open (ADR-010) right after Docker
+  Desktop restarted Redis; not confirmed.
+- Grafana's "events published within 1 s" tile goes red (87%) after Act 4. That is the deliberate Kafka outage; the GIF
+  caption says so. The proof prints no latency numbers on purpose (a 200-thread Python burst measures the client).
+- Docker Desktop's engine restarted by itself during the session (infra containers exited 255; `docker compose exec`
+  failed with 125/66 for a moment). `docker compose --profile apps --profile tools up -d --wait` recovered it; the
+  proof's `sql()` helper retries for this reason. On Windows, `bash` from Python can resolve to the WSL launcher: the
+  proof runs the SQL via `docker compose exec` instead.
+
+**Verification**
+- `JAVA_HOME=C:/Program Files/Java/jdk-23 ./mvnw verify` -> BUILD SUCCESS, 264 unit/architecture + 86 IT, 0 failures.
+- `engineering_proof.py` all five acts PASS on the final run (see `docs/assets/engineering-proof.txt`).
+- Not verified: GitHub Actions (billing lock and Trivy issue from Session 9 unchanged); the scripts are not in CI.
+
+### Session 9 — 2026-11-17 — Code-level audit for resume achievements (no code changes)
+**Goal (owner):** find the strongest, defensible engineering achievements in the code for a resume.
+
+**Findings that affect the project**
+- CI has never concluded green on GitHub (see Current status): Trivy action tag unresolvable since at least
+  2026-11-04; billing lock since 2026-11-14. The build and full-stack system jobs did pass on GitHub on 2026-11-04.
+- Wildcard CORS (`setAllowedOriginPatterns("*")`, all headers) was added to the gateway with the demo dashboard
+  (`8f1d5b7`), after the OWASP review in docs/security.md.
+- `docs/career/resume-bullets.md` (optional bullets, `5fa70d1`) says "Spring Data JDBC"; the code uses
+  `spring-boot-starter-jdbc` with `JdbcClient` (ADR-003). Its jqwik, burn-rate alert, read-only image and BOLA claims
+  were verified in code.
+- Concurrent requests with the *same* Idempotency-Key are handled by `INSERT … ON CONFLICT DO NOTHING` blocking on the
+  first transaction, but no test exercises that race (only sequential replay and key reuse).
+- No multi-tenancy, PostgreSQL RLS, or AI/LLM code exists in the repository.
+
+**Verification**
+- `JAVA_HOME=…/jdk-23 ./mvnw verify -DskipITs` → BUILD SUCCESS, 264 unit/architecture tests, 0 failures. The default
+  shell `JAVA_HOME` is JDK 17 and fails with "release version 21 not supported". Docker Desktop was not running, so
+  the 16 IT classes were not run locally.
+- CI status read from the GitHub Actions API (runs, jobs, check-run annotations).
 
 ### Session 8 — 2026-10-16 — Every README promise verified against the running system
 **Goal (owner):** go through the whole codebase and make sure everything the README describes is actually built.

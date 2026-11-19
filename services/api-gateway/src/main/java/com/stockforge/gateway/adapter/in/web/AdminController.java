@@ -4,6 +4,8 @@ import com.stockforge.gateway.application.AdminUseCases;
 import com.stockforge.gateway.domain.model.Views;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -78,7 +80,14 @@ class AdminController {
             String reason) {}
 
     @PostMapping("/products")
-    @Operation(summary = "Create a product with its initial stock")
+    @Operation(summary = "Create a product with its initial stock", description = "ADMIN only. Audited.")
+    @ApiResponses({
+        @ApiResponse(responseCode = "201", description = "Created; see Location"),
+        @ApiResponse(responseCode = "400", description = "validation-failed, malformed-request"),
+        @ApiResponse(responseCode = "401", description = "unauthorized"),
+        @ApiResponse(responseCode = "403", description = "forbidden: the token lacks the ADMIN role"),
+        @ApiResponse(responseCode = "409", description = "sku-already-exists")
+    })
     ResponseEntity<Views.Product> createProduct(
             @Valid @RequestBody CreateProductBody body, Authentication authentication) {
         Views.Product product = admin.createProduct(
@@ -94,6 +103,14 @@ class AdminController {
 
     @PostMapping("/products/{productId}/stock-adjustments")
     @Operation(summary = "Audited stock adjustment", description = "Positive delta adds stock, negative writes it off")
+    @ApiResponses({
+        @ApiResponse(responseCode = "201", description = "Adjusted; the new counters", useReturnTypeSchema = true),
+        @ApiResponse(responseCode = "403", description = "forbidden: the token lacks the ADMIN role"),
+        @ApiResponse(responseCode = "404", description = "product-not-found"),
+        @ApiResponse(
+                responseCode = "409",
+                description = "insufficient-available-stock: reserved or sold units cannot be removed")
+    })
     ResponseEntity<Views.Availability> adjustStock(
             @PathVariable UUID productId,
             @RequestHeader("Idempotency-Key")
@@ -115,6 +132,10 @@ class AdminController {
     /** 202: the messages are republished; their consumers process them asynchronously. */
     @PostMapping("/dead-letters/{topic}/replay")
     @Operation(summary = "Replay dead-lettered messages of a topic")
+    @ApiResponses({
+        @ApiResponse(responseCode = "202", description = "Republished; consumers process them asynchronously"),
+        @ApiResponse(responseCode = "403", description = "forbidden: the token lacks the ADMIN role")
+    })
     ResponseEntity<Map<String, Object>> replayDeadLetters(
             @PathVariable @Pattern(regexp = "[a-z-]{1,64}") String topic,
             @RequestParam(defaultValue = "100") @Min(1) @Max(1000) int maxMessages,
